@@ -13,7 +13,7 @@ import {
   getProviderOptionDescriptors,
   isClaudeUltrathinkPrompt,
 } from "@t3tools/shared/model";
-import { memo, useCallback, useState } from "react";
+import { memo, useCallback, useEffect, useState } from "react";
 import type { VariantProps } from "class-variance-authority";
 import { ChevronDownIcon } from "lucide-react";
 import { Button, buttonVariants } from "../ui/button";
@@ -204,7 +204,13 @@ export interface TraitsMenuContentProps {
   allowPromptInjectedEffort?: boolean;
   triggerVariant?: VariantProps<typeof buttonVariants>["variant"];
   triggerClassName?: string;
+  onOptionChange?: () => void;
 }
+
+type TraitsPickerProps = TraitsMenuContentProps & {
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
+};
 
 export const TraitsMenuContent = memo(function TraitsMenuContentImpl({
   provider,
@@ -214,6 +220,7 @@ export const TraitsMenuContent = memo(function TraitsMenuContentImpl({
   onPromptChange,
   modelOptions,
   allowPromptInjectedEffort = true,
+  onOptionChange,
   ...persistence
 }: TraitsMenuContentProps & TraitsPersistence) {
   const setProviderModelOptions = useComposerDraftStore((store) => store.setProviderModelOptions);
@@ -265,6 +272,7 @@ export const TraitsMenuContent = memo(function TraitsMenuContentImpl({
           ? ULTRATHINK_PROMPT_PREFIX
           : applyClaudePromptEffortPrefix(prompt, "ultrathink");
       onPromptChange(nextPrompt);
+      onOptionChange?.();
       return;
     }
     if (ultrathinkInBodyText && descriptor.id === primarySelectDescriptor?.id) return;
@@ -273,6 +281,7 @@ export const TraitsMenuContent = memo(function TraitsMenuContentImpl({
       onPromptChange(stripped);
     }
     updateDescriptors(replaceDescriptorCurrentValue(descriptors, descriptor.id, value));
+    onOptionChange?.();
   };
 
   if (!hasAnyControls) {
@@ -329,6 +338,7 @@ export const TraitsMenuContent = memo(function TraitsMenuContentImpl({
                 updateDescriptors(
                   replaceDescriptorCurrentValue(descriptors, descriptor.id, value === "on"),
                 );
+                onOptionChange?.();
               }}
             >
               <MenuRadioItem value="on">On</MenuRadioItem>
@@ -351,9 +361,25 @@ export const TraitsPicker = memo(function TraitsPicker({
   allowPromptInjectedEffort = true,
   triggerVariant,
   triggerClassName,
+  onOptionChange,
+  open,
+  onOpenChange,
   ...persistence
-}: TraitsMenuContentProps & TraitsPersistence) {
+}: TraitsPickerProps & TraitsPersistence) {
   const [isMenuOpen, setIsMenuOpen] = useState(false);
+  const resolvedOpen = open ?? isMenuOpen;
+  const setResolvedOpen = useCallback(
+    (nextOpen: boolean) => {
+      setIsMenuOpen(nextOpen);
+      onOpenChange?.(nextOpen);
+    },
+    [onOpenChange],
+  );
+  useEffect(() => {
+    if (open !== undefined) {
+      setIsMenuOpen(open);
+    }
+  }, [open]);
   const { descriptors, primarySelectDescriptor, ultrathinkPromptControlled } =
     getTraitsSectionVisibility({
       provider,
@@ -396,12 +422,7 @@ export const TraitsPicker = memo(function TraitsPicker({
   const isCodexStyle = provider === "codex";
 
   return (
-    <Menu
-      open={isMenuOpen}
-      onOpenChange={(open) => {
-        setIsMenuOpen(open);
-      }}
-    >
+    <Menu open={resolvedOpen} onOpenChange={setResolvedOpen}>
       <MenuTrigger
         render={
           <Button
@@ -437,6 +458,7 @@ export const TraitsPicker = memo(function TraitsPicker({
           onPromptChange={onPromptChange}
           modelOptions={modelOptions}
           allowPromptInjectedEffort={allowPromptInjectedEffort}
+          {...(onOptionChange ? { onOptionChange } : {})}
           {...persistence}
         />
       </MenuPopup>

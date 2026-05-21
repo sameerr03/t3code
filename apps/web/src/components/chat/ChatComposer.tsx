@@ -18,7 +18,12 @@ import {
   PROVIDER_SEND_TURN_MAX_ATTACHMENTS,
   PROVIDER_SEND_TURN_MAX_IMAGE_BYTES,
 } from "@t3tools/contracts";
-import { createModelSelection, normalizeModelSlug } from "@t3tools/shared/model";
+import {
+  createModelSelection,
+  getProviderOptionCurrentValue,
+  getProviderOptionDescriptors,
+  normalizeModelSlug,
+} from "@t3tools/shared/model";
 import {
   memo,
   useCallback,
@@ -34,6 +39,7 @@ import { useDebouncedValue } from "@tanstack/react-pacer";
 import { projectSearchEntriesQueryOptions } from "~/lib/projectReactQuery";
 import {
   clampCollapsedComposerCursor,
+  type ComposerSlashCommand,
   type ComposerTrigger,
   collapseExpandedComposerCursor,
   detectComposerTrigger,
@@ -86,16 +92,26 @@ import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { toastManager } from "../ui/toast";
 import {
   BotIcon,
+  BrainIcon,
   CircleAlertIcon,
+  FolderGit2Icon,
+  FolderIcon,
+  GitBranchIcon,
+  HammerIcon,
   ListTodoIcon,
   type LucideIcon,
+  LockKeyholeIcon,
   LockIcon,
   LockOpenIcon,
   PenLineIcon,
+  ZapIcon,
   XIcon,
 } from "lucide-react";
 import { proposedPlanTitle } from "../../proposedPlan";
-import { getProviderInteractionModeToggle } from "../../providerModels";
+import {
+  getProviderInteractionModeToggle,
+  getProviderModelCapabilities,
+} from "../../providerModels";
 import {
   deriveProviderInstanceEntries,
   resolveProviderDriverKindForInstanceSelection,
@@ -187,6 +203,9 @@ const ComposerFooterModeControls = memo(function ComposerFooterModeControls(prop
   planSidebarOpen: boolean;
   onToggleInteractionMode: () => void;
   onRuntimeModeChange: (mode: RuntimeMode) => void;
+  runtimeModePickerOpen?: boolean;
+  onRuntimeModePickerOpenChange?: (open: boolean) => void;
+  onComposerControlChange?: () => void;
   onTogglePlanSidebar: () => void;
 }) {
   const runtimeModeOption = runtimeModeConfig[props.runtimeMode];
@@ -222,7 +241,13 @@ const ComposerFooterModeControls = memo(function ComposerFooterModeControls(prop
 
       <Select
         value={props.runtimeMode}
-        onValueChange={(value) => props.onRuntimeModeChange(value!)}
+        onValueChange={(value) => {
+          if (!value || value === props.runtimeMode) return;
+          props.onRuntimeModeChange(value);
+          props.onComposerControlChange?.();
+        }}
+        open={props.runtimeModePickerOpen}
+        onOpenChange={props.onRuntimeModePickerOpenChange}
       >
         <SelectTrigger
           variant="ghost"
@@ -343,6 +368,7 @@ export interface ChatComposerHandle {
   openModelPicker: () => void;
   toggleModelPicker: () => void;
   isModelPickerOpen: () => boolean;
+  runSlashCommand: (command: Exclude<ComposerSlashCommand, "model">) => boolean;
   readSnapshot: () => {
     value: string;
     cursor: number;
@@ -443,6 +469,8 @@ export interface ChatComposerProps {
   keybindings: ResolvedKeybindingsConfig;
   terminalOpen: boolean;
   gitCwd: string | null;
+  workspaceSlashCommand: "worktree" | "work-locally" | null;
+  canOpenBranchPicker: boolean;
 
   // Refs the parent needs kept in sync
   promptRef: React.RefObject<string>;
@@ -476,7 +504,8 @@ export interface ChatComposerProps {
   onProviderModelSelect: (instanceId: ProviderInstanceId, model: string) => void;
   toggleInteractionMode: () => void;
   handleRuntimeModeChange: (mode: RuntimeMode) => void;
-  handleInteractionModeChange: (mode: ProviderInteractionMode) => void;
+  handleSlashCommand: (command: Exclude<ComposerSlashCommand, "model">) => boolean;
+  onOpenBranchPicker: () => boolean;
   togglePlanSidebar: () => void;
 
   focusComposer: () => void;
@@ -533,6 +562,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     keybindings,
     terminalOpen,
     gitCwd,
+    workspaceSlashCommand,
+    canOpenBranchPicker,
     promptRef,
     composerRef,
     composerImagesRef,
@@ -550,7 +581,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     onProviderModelSelect,
     toggleInteractionMode,
     handleRuntimeModeChange,
-    handleInteractionModeChange,
+    handleSlashCommand,
+    onOpenBranchPicker,
     togglePlanSidebar,
     focusComposer,
     scheduleComposerFocus,
@@ -793,6 +825,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const [isComposerFooterCompact, setIsComposerFooterCompact] = useState(false);
   const [isComposerPrimaryActionsCompact, setIsComposerPrimaryActionsCompact] = useState(false);
   const [isComposerModelPickerOpen, setIsComposerModelPickerOpen] = useState(false);
+  const [isProviderTraitsPickerOpen, setIsProviderTraitsPickerOpen] = useState(false);
+  const [isRuntimeModePickerOpen, setIsRuntimeModePickerOpen] = useState(false);
+  const [isCompactControlsMenuOpen, setIsCompactControlsMenuOpen] = useState(false);
   const [isComposerFocused, setIsComposerFocused] = useState(false);
   const isMobileViewport = useMediaQuery("max-sm");
   const isComposerCollapsedMobile = isMobileViewport && !isComposerFocused;
@@ -849,6 +884,24 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     }),
   );
   const workspaceEntries = workspaceEntriesQuery.data?.entries ?? EMPTY_PROJECT_ENTRIES;
+  const selectedProviderOptionDescriptors = useMemo(() => {
+    const caps = getProviderModelCapabilities(
+      selectedProviderModels,
+      selectedModel,
+      selectedProvider,
+    );
+    return getProviderOptionDescriptors({
+      caps,
+      selections: composerModelOptions?.[selectedProvider],
+    });
+  }, [composerModelOptions, selectedModel, selectedProvider, selectedProviderModels]);
+  const reasoningDescriptor = selectedProviderOptionDescriptors.find(
+    (descriptor) => descriptor.id === "reasoningEffort" && descriptor.type === "select",
+  );
+  const fastModeDescriptor = selectedProviderOptionDescriptors.find(
+    (descriptor) => descriptor.id === "fastMode" && descriptor.type === "boolean",
+  );
+  const isFastModeEnabled = getProviderOptionCurrentValue(fastModeDescriptor ?? null) === true;
 
   const composerMenuItems = useMemo<ComposerCommandItem[]>(() => {
     if (!composerTrigger) return [];
@@ -863,29 +916,84 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       }));
     }
     if (composerTrigger.kind === "slash-command") {
-      const builtInSlashCommandItems = [
+      const builtInSlashCommandItems: Extract<ComposerCommandItem, { type: "slash-command" }>[] = [
         {
           id: "slash:model",
           type: "slash-command",
           command: "model",
           label: "/model",
           description: "Switch response model for this thread",
+          icon: BotIcon,
         },
         {
           id: "slash:plan",
           type: "slash-command",
           command: "plan",
           label: "/plan",
-          description: "Switch this thread into plan mode",
+          description:
+            interactionMode === "plan"
+              ? "Switch this thread back to build mode"
+              : "Switch this thread into plan mode",
+          icon: interactionMode === "plan" ? HammerIcon : ListTodoIcon,
         },
-        {
-          id: "slash:default",
+      ];
+      if (reasoningDescriptor) {
+        builtInSlashCommandItems.push({
+          id: "slash:reasoning",
           type: "slash-command",
-          command: "default",
-          label: "/default",
-          description: "Switch this thread back to normal build mode",
-        },
-      ] satisfies ReadonlyArray<Extract<ComposerCommandItem, { type: "slash-command" }>>;
+          command: "reasoning",
+          label: "/reasoning",
+          description: "Open reasoning options",
+          icon: BrainIcon,
+        });
+      }
+      if (fastModeDescriptor) {
+        builtInSlashCommandItems.push({
+          id: "slash:fast",
+          type: "slash-command",
+          command: "fast",
+          label: "/fast",
+          description: isFastModeEnabled ? "Turn fast mode off" : "Turn fast mode on",
+          icon: ZapIcon,
+        });
+      }
+      builtInSlashCommandItems.push({
+        id: "slash:permissions",
+        type: "slash-command",
+        command: "permissions",
+        label: "/permissions",
+        description: "Open permission options",
+        icon: LockKeyholeIcon,
+      });
+      if (workspaceSlashCommand === "worktree") {
+        builtInSlashCommandItems.push({
+          id: "slash:worktree",
+          type: "slash-command",
+          command: "worktree",
+          label: "/worktree",
+          description: "Use a new worktree for this thread",
+          icon: FolderGit2Icon,
+        });
+      } else if (workspaceSlashCommand === "work-locally") {
+        builtInSlashCommandItems.push({
+          id: "slash:work-locally",
+          type: "slash-command",
+          command: "work-locally",
+          label: "/work-locally",
+          description: "Use the current checkout",
+          icon: FolderIcon,
+        });
+      }
+      if (canOpenBranchPicker) {
+        builtInSlashCommandItems.push({
+          id: "slash:branch",
+          type: "slash-command",
+          command: "branch",
+          label: "/branch",
+          description: "Open branch selector",
+          icon: GitBranchIcon,
+        });
+      }
       const providerSlashCommandItems = (selectedProviderStatus?.slashCommands ?? []).map(
         (command) => ({
           id: `provider-slash-command:${selectedProvider}:${command.name}`,
@@ -919,7 +1027,18 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       );
     }
     return [];
-  }, [composerTrigger, selectedProvider, selectedProviderStatus, workspaceEntries]);
+  }, [
+    canOpenBranchPicker,
+    composerTrigger,
+    fastModeDescriptor,
+    interactionMode,
+    isFastModeEnabled,
+    reasoningDescriptor,
+    selectedProvider,
+    selectedProviderStatus,
+    workspaceEntries,
+    workspaceSlashCommand,
+  ]);
 
   const composerMenuOpen = Boolean(composerTrigger);
   const composerMenuSearchKey = composerTrigger
@@ -1015,6 +1134,16 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     },
     [composerDraftTarget, promptRef, scheduleComposerFocus, setComposerDraftPrompt],
   );
+  const refocusComposerAfterControlChange = useCallback(() => {
+    setIsProviderTraitsPickerOpen(false);
+    setIsRuntimeModePickerOpen(false);
+    setIsCompactControlsMenuOpen(false);
+    window.setTimeout(() => {
+      window.requestAnimationFrame(() => {
+        focusComposer();
+      });
+    }, 0);
+  }, [focusComposer]);
 
   const providerTraitsMenuContent = renderProviderTraitsMenuContent({
     provider: selectedProvider,
@@ -1025,6 +1154,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     modelOptions: composerModelOptions?.[selectedProvider],
     prompt,
     onPromptChange: setPromptFromTraits,
+    onOptionChange: refocusComposerAfterControlChange,
   });
   const providerTraitsPicker = renderProviderTraitsPicker({
     provider: selectedProvider,
@@ -1035,6 +1165,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     modelOptions: composerModelOptions?.[selectedProvider],
     prompt,
     onPromptChange: setPromptFromTraits,
+    onOptionChange: refocusComposerAfterControlChange,
+    open: isProviderTraitsPickerOpen,
+    onOpenChange: setIsProviderTraitsPickerOpen,
   });
   const pendingPrimaryAction = useMemo(
     () =>
@@ -1077,6 +1210,36 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       addComposerDraftImages(composerDraftTarget, images);
     },
     [composerDraftTarget, addComposerDraftImages],
+  );
+
+  const runSlashCommand = useCallback(
+    (command: Exclude<ComposerSlashCommand, "model">): boolean => {
+      switch (command) {
+        case "reasoning":
+          if (!reasoningDescriptor) return false;
+          if (isComposerFooterCompact) {
+            setIsCompactControlsMenuOpen(true);
+            return true;
+          }
+          setIsProviderTraitsPickerOpen(true);
+          return true;
+        case "permissions":
+          if (isComposerFooterCompact) {
+            setIsCompactControlsMenuOpen(true);
+            return true;
+          }
+          setIsRuntimeModePickerOpen(true);
+          return true;
+        case "branch":
+          return onOpenBranchPicker();
+        case "plan":
+        case "fast":
+        case "worktree":
+        case "work-locally":
+          return handleSlashCommand(command);
+      }
+    },
+    [handleSlashCommand, isComposerFooterCompact, onOpenBranchPicker, reasoningDescriptor],
   );
 
   const removeComposerImageFromDraft = useCallback(
@@ -1507,7 +1670,15 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
           }
           return;
         }
-        void handleInteractionModeChange(item.command === "plan" ? "plan" : "default");
+        const handled = runSlashCommand(item.command);
+        if (!handled) {
+          toastManager.add({
+            type: "warning",
+            title: "Slash command unavailable",
+            description: `/${item.command} is not available for this thread or selected model.`,
+          });
+          return;
+        }
         const applied = applyPromptReplacement(trigger.rangeStart, trigger.rangeEnd, "", {
           expectedText: snapshot.value.slice(trigger.rangeStart, trigger.rangeEnd),
         });
@@ -1553,7 +1724,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         return;
       }
     },
-    [applyPromptReplacement, handleInteractionModeChange, resolveActiveComposerTrigger],
+    [applyPromptReplacement, resolveActiveComposerTrigger, runSlashCommand],
   );
 
   const onComposerMenuItemHighlighted = useCallback(
@@ -1848,6 +2019,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         setIsComposerModelPickerOpen((open) => !open);
       },
       isModelPickerOpen: () => isComposerModelPickerOpen,
+      runSlashCommand,
       readSnapshot: () => {
         return readComposerSnapshot();
       },
@@ -1926,6 +2098,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       composerImagesRef,
       composerTerminalContextsRef,
       isComposerModelPickerOpen,
+      runSlashCommand,
       readComposerSnapshot,
       selectedModel,
       selectedModelOptionsForDispatch,
@@ -2346,9 +2519,12 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     runtimeMode={runtimeMode}
                     showInteractionModeToggle={composerProviderControls.showInteractionModeToggle}
                     traitsMenuContent={providerTraitsMenuContent}
+                    open={isCompactControlsMenuOpen}
+                    onOpenChange={setIsCompactControlsMenuOpen}
                     onToggleInteractionMode={toggleInteractionMode}
                     onTogglePlanSidebar={togglePlanSidebar}
                     onRuntimeModeChange={handleRuntimeModeChange}
+                    onComposerControlChange={refocusComposerAfterControlChange}
                   />
                 ) : (
                   <>
@@ -2367,6 +2543,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                       planSidebarOpen={planSidebarOpen}
                       onToggleInteractionMode={toggleInteractionMode}
                       onRuntimeModeChange={handleRuntimeModeChange}
+                      runtimeModePickerOpen={isRuntimeModePickerOpen}
+                      onRuntimeModePickerOpenChange={setIsRuntimeModePickerOpen}
+                      onComposerControlChange={refocusComposerAfterControlChange}
                       onTogglePlanSidebar={togglePlanSidebar}
                     />
                   </>

@@ -20,12 +20,15 @@ export const CompactComposerControlsMenu = memo(function CompactComposerControls
   runtimeMode: RuntimeMode;
   showInteractionModeToggle: boolean;
   traitsMenuContent?: ReactNode;
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
   onToggleInteractionMode: () => void;
   onTogglePlanSidebar: () => void;
   onRuntimeModeChange: (mode: RuntimeMode) => void;
+  onComposerControlChange?: () => void;
 }) {
   return (
-    <Menu>
+    <Menu open={props.open} onOpenChange={props.onOpenChange}>
       <MenuTrigger
         render={
           <Button
@@ -53,6 +56,8 @@ export const CompactComposerControlsMenu = memo(function CompactComposerControls
               onValueChange={(value) => {
                 if (!value || value === props.interactionMode) return;
                 props.onToggleInteractionMode();
+                props.onOpenChange?.(false);
+                props.onComposerControlChange?.();
               }}
             >
               <MenuRadioItem value="default">Chat</MenuRadioItem>
@@ -67,6 +72,8 @@ export const CompactComposerControlsMenu = memo(function CompactComposerControls
           onValueChange={(value) => {
             if (!value || value === props.runtimeMode) return;
             props.onRuntimeModeChange(value as RuntimeMode);
+            props.onOpenChange?.(false);
+            props.onComposerControlChange?.();
           }}
         >
           <MenuRadioItem value="approval-required">Supervised</MenuRadioItem>

@@ -300,8 +300,24 @@ describe("parseStandaloneComposerSlashCommand", () => {
     expect(parseStandaloneComposerSlashCommand(" /plan ")).toBe("plan");
   });
 
-  it("parses standalone /default command", () => {
-    expect(parseStandaloneComposerSlashCommand("/default")).toBe("default");
+  it("parses the final standalone composer commands", () => {
+    expect(parseStandaloneComposerSlashCommand("/reasoning")).toBe("reasoning");
+    expect(parseStandaloneComposerSlashCommand("/fast")).toBe("fast");
+    expect(parseStandaloneComposerSlashCommand("/permissions")).toBe("permissions");
+    expect(parseStandaloneComposerSlashCommand("/worktree")).toBe("worktree");
+    expect(parseStandaloneComposerSlashCommand("/work-locally")).toBe("work-locally");
+    expect(parseStandaloneComposerSlashCommand("/branch")).toBe("branch");
+  });
+
+  it("rejects removed direct-state commands", () => {
+    expect(parseStandaloneComposerSlashCommand("/default")).toBeNull();
+    expect(parseStandaloneComposerSlashCommand("/build")).toBeNull();
+    expect(parseStandaloneComposerSlashCommand("/ask")).toBeNull();
+    expect(parseStandaloneComposerSlashCommand("/auto")).toBeNull();
+    expect(parseStandaloneComposerSlashCommand("/full")).toBeNull();
+    expect(parseStandaloneComposerSlashCommand("/slow")).toBeNull();
+    expect(parseStandaloneComposerSlashCommand("/reasoning-high")).toBeNull();
+    expect(parseStandaloneComposerSlashCommand("/checkout")).toBeNull();
   });
 
   it("ignores slash commands with extra message text", () => {

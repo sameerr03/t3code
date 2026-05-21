@@ -3998,6 +3998,11 @@ describe("ChatView timeline estimator parity (full app)", () => {
         envMode: "worktree",
         worktreePath: null,
       });
+      const composerEditor = await waitForComposerEditor();
+      await vi.waitFor(() => {
+        expect(document.activeElement).toBe(composerEditor);
+        expect(document.querySelector('[data-slot="combobox-popup"]')).toBeNull();
+      });
     } finally {
       await mounted.cleanup();
     }
@@ -5985,6 +5990,32 @@ describe("ChatView timeline estimator parity (full app)", () => {
         );
         expect(searchInput).not.toBeNull();
         expect(document.activeElement).toBe(searchInput);
+      });
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("opens reasoning options when selecting /reasoning", async () => {
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: createSnapshotForTargetUser({
+        targetMessageId: "msg-user-reasoning-command-target" as MessageId,
+        targetText: "reasoning command thread",
+      }),
+    });
+
+    try {
+      await waitForComposerEditor();
+      await page.getByTestId("composer-editor").fill("/rea");
+
+      const menuItem = await waitForComposerMenuItem("slash:reasoning");
+      await menuItem.click();
+
+      await vi.waitFor(() => {
+        const menuPopup = document.querySelector<HTMLElement>('[data-slot="menu-popup"]');
+        expect(menuPopup).not.toBeNull();
+        expect(menuPopup?.textContent).toContain("Reasoning");
       });
     } finally {
       await mounted.cleanup();

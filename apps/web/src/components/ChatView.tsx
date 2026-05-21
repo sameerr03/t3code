@@ -8,6 +8,7 @@ import {
   type ProjectScript,
   type ProjectId,
   type ProviderApprovalDecision,
+  type ProviderOptionDescriptor,
   ProviderInstanceId,
   type ServerProvider,
   type ResolvedKeybindingsConfig,
@@ -29,7 +30,10 @@ import {
 } from "@t3tools/client-runtime";
 import {
   applyClaudePromptEffortPrefix,
+  buildProviderOptionSelectionsFromDescriptors,
   createModelSelection,
+  getProviderOptionCurrentValue,
+  getProviderOptionDescriptors,
   resolvePromptInjectedEffort,
 } from "@t3tools/shared/model";
 import { projectScriptCwd, projectScriptRuntimeEnv } from "@t3tools/shared/projectScripts";
@@ -46,6 +50,7 @@ import { readLocalApi } from "../localApi";
 import { parseDiffRouteSearch, stripDiffSearchParams } from "../diffRouteSearch";
 import {
   collapseExpandedComposerCursor,
+  type ComposerSlashCommand,
   parseStandaloneComposerSlashCommand,
 } from "../composer-logic";
 import {
@@ -331,6 +336,27 @@ function formatOutgoingPrompt(params: {
   const caps = getProviderModelCapabilities(params.models, params.model, params.provider);
   const promptEffort = resolvePromptInjectedEffort(caps, params.effort);
   return applyClaudePromptEffortPrefix(params.text, promptEffort);
+}
+
+function updateProviderOptionDescriptor(
+  descriptors: ReadonlyArray<ProviderOptionDescriptor>,
+  id: string,
+  value: string | boolean,
+): ReadonlyArray<ProviderOptionDescriptor> | null {
+  let found = false;
+  const nextDescriptors = descriptors.map((descriptor) => {
+    if (descriptor.id !== id) return descriptor;
+    if (descriptor.type === "boolean") {
+      if (typeof value !== "boolean") return descriptor;
+      found = true;
+      return { ...descriptor, currentValue: value };
+    }
+    if (typeof value !== "string") return descriptor;
+    if (!descriptor.options.some((option) => option.id === value)) return descriptor;
+    found = true;
+    return { ...descriptor, currentValue: value };
+  });
+  return found ? nextDescriptors : null;
 }
 const SCRIPT_TERMINAL_COLS = 120;
 const SCRIPT_TERMINAL_ROWS = 30;
@@ -659,6 +685,9 @@ export default function ChatView(props: ChatViewProps) {
     (store) => store.setTerminalContexts,
   );
   const setComposerDraftModelSelection = useComposerDraftStore((store) => store.setModelSelection);
+  const setComposerDraftProviderModelOptions = useComposerDraftStore(
+    (store) => store.setProviderModelOptions,
+  );
   const setComposerDraftRuntimeMode = useComposerDraftStore((store) => store.setRuntimeMode);
   const setComposerDraftInteractionMode = useComposerDraftStore(
     (store) => store.setInteractionMode,
@@ -722,6 +751,7 @@ export default function ChatView(props: ChatViewProps) {
   const [pendingServerThreadEnvMode, setPendingServerThreadEnvMode] =
     useState<DraftThreadEnvMode | null>(null);
   const [pendingServerThreadBranch, setPendingServerThreadBranch] = useState<string | null>();
+  const [branchPickerOpenRequestId, setBranchPickerOpenRequestId] = useState<number | null>(null);
   const [lastInvokedScriptByProjectId, setLastInvokedScriptByProjectId] = useLocalStorage(
     LAST_INVOKED_SCRIPT_BY_PROJECT_KEY,
     {},
@@ -2339,6 +2369,106 @@ export default function ChatView(props: ChatViewProps) {
     requestedEnvMode: envMode,
     isGitRepo,
   });
+  const canChangeWorkspaceMode = Boolean(
+    isGitRepo && !envLocked && (canOverrideServerThreadEnvMode || isLocalDraftThread),
+  );
+  const workspaceSlashCommand = canChangeWorkspaceMode
+    ? envMode === "worktree"
+      ? "work-locally"
+      : "worktree"
+    : null;
+  const canOpenBranchPicker = Boolean(isGitRepo && !envLocked);
+  const openBranchPicker = useCallback(() => {
+    if (!canOpenBranchPicker) return false;
+    setBranchPickerOpenRequestId((id) => (id ?? 0) + 1);
+    return true;
+  }, [canOpenBranchPicker]);
+
+  const applyComposerProviderOption = (id: string, value: string | boolean): boolean => {
+    const sendCtx = composerRef.current?.getSendContext();
+    if (!sendCtx) return false;
+    const caps = getProviderModelCapabilities(
+      sendCtx.selectedProviderModels,
+      sendCtx.selectedModel,
+      sendCtx.selectedProvider,
+    );
+    const descriptors = getProviderOptionDescriptors({
+      caps,
+      selections: sendCtx.selectedModelSelection.options,
+    });
+    const nextDescriptors = updateProviderOptionDescriptor(descriptors, id, value);
+    if (!nextDescriptors) return false;
+    setComposerDraftProviderModelOptions(
+      composerDraftTarget,
+      sendCtx.selectedProvider,
+      buildProviderOptionSelectionsFromDescriptors(nextDescriptors),
+      { model: sendCtx.selectedModel ?? undefined, persistSticky: true },
+    );
+    scheduleComposerFocus();
+    return true;
+  };
+
+  const handleSlashCommand = (command: Exclude<ComposerSlashCommand, "model">): boolean => {
+    switch (command) {
+      case "plan":
+        handleInteractionModeChange(interactionMode === "plan" ? "default" : "plan");
+        return true;
+      case "fast": {
+        const sendCtx = composerRef.current?.getSendContext();
+        if (!sendCtx) return false;
+        const caps = getProviderModelCapabilities(
+          sendCtx.selectedProviderModels,
+          sendCtx.selectedModel,
+          sendCtx.selectedProvider,
+        );
+        const descriptors = getProviderOptionDescriptors({
+          caps,
+          selections: sendCtx.selectedModelSelection.options,
+        });
+        const fastModeDescriptor = descriptors.find(
+          (descriptor) => descriptor.id === "fastMode" && descriptor.type === "boolean",
+        );
+        if (!fastModeDescriptor) return false;
+        return applyComposerProviderOption(
+          "fastMode",
+          getProviderOptionCurrentValue(fastModeDescriptor) !== true,
+        );
+      }
+      case "worktree": {
+        if (!isGitRepo || envLocked) return false;
+        if (canOverrideServerThreadEnvMode) {
+          setPendingServerThreadEnvMode("worktree");
+        } else if (isLocalDraftThread) {
+          setDraftThreadContext(composerDraftTarget, {
+            envMode: "worktree",
+            ...(draftThread?.worktreePath ? { worktreePath: null } : {}),
+          });
+        } else {
+          return false;
+        }
+        scheduleComposerFocus();
+        return true;
+      }
+      case "work-locally": {
+        if (!isGitRepo || envLocked) return false;
+        if (canOverrideServerThreadEnvMode) {
+          setPendingServerThreadEnvMode("local");
+        } else if (isLocalDraftThread) {
+          setDraftThreadContext(composerDraftTarget, {
+            envMode: "local",
+          });
+        } else {
+          return false;
+        }
+        scheduleComposerFocus();
+        return true;
+      }
+      case "reasoning":
+      case "permissions":
+      case "branch":
+        return false;
+    }
+  };
 
   useEffect(() => {
     setPendingServerThreadEnvMode(null);
@@ -2665,10 +2795,21 @@ export default function ChatView(props: ChatViewProps) {
         ? parseStandaloneComposerSlashCommand(trimmed)
         : null;
     if (standaloneSlashCommand) {
-      handleInteractionModeChange(standaloneSlashCommand);
+      const handled =
+        composerRef.current?.runSlashCommand(standaloneSlashCommand) ??
+        handleSlashCommand(standaloneSlashCommand);
       promptRef.current = "";
       clearComposerDraftContent(composerDraftTarget);
       composerRef.current?.resetCursorState();
+      if (!handled) {
+        toastManager.add(
+          stackedThreadToast({
+            type: "warning",
+            title: "Slash command unavailable",
+            description: `/${standaloneSlashCommand} is not available for this thread or selected model.`,
+          }),
+        );
+      }
       return;
     }
     if (!hasSendableContent) {
@@ -3650,6 +3791,8 @@ export default function ChatView(props: ChatViewProps) {
                   keybindings={keybindings}
                   terminalOpen={Boolean(terminalState.terminalOpen)}
                   gitCwd={gitCwd}
+                  workspaceSlashCommand={workspaceSlashCommand}
+                  canOpenBranchPicker={canOpenBranchPicker}
                   promptRef={promptRef}
                   composerImagesRef={composerImagesRef}
                   composerTerminalContextsRef={composerTerminalContextsRef}
@@ -3670,7 +3813,8 @@ export default function ChatView(props: ChatViewProps) {
                   onProviderModelSelect={onProviderModelSelect}
                   toggleInteractionMode={toggleInteractionMode}
                   handleRuntimeModeChange={handleRuntimeModeChange}
-                  handleInteractionModeChange={handleInteractionModeChange}
+                  handleSlashCommand={handleSlashCommand}
+                  onOpenBranchPicker={openBranchPicker}
                   togglePlanSidebar={togglePlanSidebar}
                   focusComposer={focusComposer}
                   scheduleComposerFocus={scheduleComposerFocus}
@@ -3693,6 +3837,7 @@ export default function ChatView(props: ChatViewProps) {
                     }
                   : {})}
                 envLocked={envLocked}
+                {...(branchPickerOpenRequestId !== null ? { branchPickerOpenRequestId } : {})}
                 onComposerFocusRequest={scheduleComposerFocus}
                 {...(canCheckoutPullRequestIntoThread
                   ? { onCheckoutPullRequestRequest: openPullRequestDialog }

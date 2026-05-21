@@ -42,6 +42,9 @@ type TraitsRenderInput = {
   modelOptions: ReadonlyArray<ProviderOptionSelection> | undefined;
   prompt: string;
   onPromptChange: (prompt: string) => void;
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
+  onOptionChange?: () => void;
 };
 
 export function getComposerProviderState(input: ComposerProviderStateInput): ComposerProviderState {
@@ -76,8 +79,17 @@ function renderTraitsControl(
   Component: typeof TraitsMenuContent | typeof TraitsPicker,
   input: TraitsRenderInput,
 ): ReactNode {
-  const { provider, threadRef, draftId, model, models, modelOptions, prompt, onPromptChange } =
-    input;
+  const {
+    provider,
+    threadRef,
+    draftId,
+    model,
+    models,
+    modelOptions,
+    prompt,
+    onPromptChange,
+    onOptionChange,
+  } = input;
   const hasTarget = threadRef !== undefined || draftId !== undefined;
   if (
     !hasTarget ||
@@ -95,6 +107,7 @@ function renderTraitsControl(
       modelOptions={modelOptions}
       prompt={prompt}
       onPromptChange={onPromptChange}
+      {...(onOptionChange ? { onOptionChange } : {})}
     />
   );
 }
@@ -104,5 +117,37 @@ export function renderProviderTraitsMenuContent(input: TraitsRenderInput): React
 }
 
 export function renderProviderTraitsPicker(input: TraitsRenderInput): ReactNode {
-  return renderTraitsControl(TraitsPicker, input);
+  const {
+    provider,
+    threadRef,
+    draftId,
+    model,
+    models,
+    modelOptions,
+    prompt,
+    onPromptChange,
+    onOptionChange,
+  } = input;
+  const hasTarget = threadRef !== undefined || draftId !== undefined;
+  if (
+    !hasTarget ||
+    !shouldRenderTraitsControls({ provider, models, model, modelOptions, prompt })
+  ) {
+    return null;
+  }
+  return (
+    <TraitsPicker
+      provider={provider}
+      models={models}
+      {...(threadRef ? { threadRef } : {})}
+      {...(draftId ? { draftId } : {})}
+      model={model}
+      modelOptions={modelOptions}
+      prompt={prompt}
+      onPromptChange={onPromptChange}
+      {...(onOptionChange ? { onOptionChange } : {})}
+      {...(input.open !== undefined ? { open: input.open } : {})}
+      {...(input.onOpenChange ? { onOpenChange: input.onOpenChange } : {})}
+    />
+  );
 }
