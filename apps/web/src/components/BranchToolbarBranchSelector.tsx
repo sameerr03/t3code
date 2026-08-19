@@ -79,6 +79,8 @@ interface BranchToolbarBranchSelectorProps {
   onStartFromOriginChange: (startFromOrigin: boolean) => void;
   onCheckoutPullRequestRequest?: (reference: string) => void;
   onComposerFocusRequest?: () => void;
+  openRequestId?: number | null;
+  onOpenRequestHandled?: (requestId: number) => void;
 }
 
 function toBranchActionErrorMessage(error: unknown): string {
@@ -98,6 +100,8 @@ export function BranchToolbarBranchSelector({
   onStartFromOriginChange,
   onCheckoutPullRequestRequest,
   onComposerFocusRequest,
+  openRequestId,
+  onOpenRequestHandled,
 }: BranchToolbarBranchSelectorProps) {
   const startFromOriginSwitchId = useId();
   const stopThreadSession = useAtomCommand(threadEnvironment.stopSession, "thread session stop");
@@ -208,6 +212,8 @@ export function BranchToolbarBranchSelector({
   // Git ref queries
   // ---------------------------------------------------------------------------
   const [isBranchMenuOpen, setIsBranchMenuOpen] = useState(false);
+  const openedFromRequestRef = useRef(false);
+  const pendingOpenRequestRef = useRef(false);
   const [branchQuery, setBranchQuery] = useState("");
   const deferredBranchQuery = useDeferredValue(branchQuery);
 
@@ -330,6 +336,19 @@ export function BranchToolbarBranchSelector({
         ? queriedActiveBranch.isRemote === true
         : null;
   const [isBranchActionPending, startBranchActionTransition] = useTransition();
+  useEffect(() => {
+    if (openRequestId !== null && openRequestId !== undefined) {
+      openedFromRequestRef.current = true;
+      pendingOpenRequestRef.current = true;
+      onOpenRequestHandled?.(openRequestId);
+    }
+  }, [onOpenRequestHandled, openRequestId]);
+  useEffect(() => {
+    if (pendingOpenRequestRef.current && !isInitialBranchesLoadPending && !isBranchActionPending) {
+      pendingOpenRequestRef.current = false;
+      setIsBranchMenuOpen(true);
+    }
+  }, [isBranchActionPending, isInitialBranchesLoadPending]);
   const totalBranchCount = branchRefState.data?.totalCount ?? 0;
   const branchStatusText = isInitialBranchesLoadPending
     ? "Loading refs..."
@@ -394,6 +413,7 @@ export function BranchToolbarBranchSelector({
 
     if (isSelectingWorktreeBase) {
       setThreadBranch(refName.name, null);
+      openedFromRequestRef.current = false;
       setIsBranchMenuOpen(false);
       onComposerFocusRequest?.();
       return;
@@ -407,6 +427,7 @@ export function BranchToolbarBranchSelector({
 
     if (selectionTarget.reuseExistingWorktree) {
       setThreadBranch(refName.name, selectionTarget.nextWorktreePath);
+      openedFromRequestRef.current = false;
       setIsBranchMenuOpen(false);
       onComposerFocusRequest?.();
       return;
@@ -416,6 +437,7 @@ export function BranchToolbarBranchSelector({
       ? deriveLocalBranchNameFromRemoteRef(refName.name)
       : refName.name;
 
+    openedFromRequestRef.current = false;
     setIsBranchMenuOpen(false);
     onComposerFocusRequest?.();
 
@@ -454,6 +476,7 @@ export function BranchToolbarBranchSelector({
     const name = sanitizeNewRefName(rawName);
     if (!branchCwd || !name || isBranchActionPending) return;
 
+    openedFromRequestRef.current = false;
     setIsBranchMenuOpen(false);
     onComposerFocusRequest?.();
 
@@ -519,13 +542,20 @@ export function BranchToolbarBranchSelector({
   // ---------------------------------------------------------------------------
   const branchListScrollElementRef = useRef<HTMLElement | null>(null);
   const previousBranchListScrollTopRef = useRef<number | null>(null);
-  const handleOpenChange = useCallback((open: boolean) => {
-    previousBranchListScrollTopRef.current = null;
-    setIsBranchMenuOpen(open);
-    if (!open) {
-      setBranchQuery("");
-    }
-  }, []);
+  const handleOpenChange = useCallback(
+    (open: boolean) => {
+      previousBranchListScrollTopRef.current = null;
+      setIsBranchMenuOpen(open);
+      if (!open) {
+        setBranchQuery("");
+        if (openedFromRequestRef.current) {
+          openedFromRequestRef.current = false;
+          onComposerFocusRequest?.();
+        }
+      }
+    },
+    [onComposerFocusRequest],
+  );
 
   const [showTopBranchScrollFade, setShowTopBranchScrollFade] = useState(false);
   const [showBottomBranchScrollFade, setShowBottomBranchScrollFade] = useState(false);
@@ -641,6 +671,7 @@ export function BranchToolbarBranchSelector({
             if (!prReference || !onCheckoutPullRequestRequest) {
               return;
             }
+            openedFromRequestRef.current = false;
             setIsBranchMenuOpen(false);
             setBranchQuery("");
             onComposerFocusRequest?.();

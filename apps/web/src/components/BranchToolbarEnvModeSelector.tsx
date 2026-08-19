@@ -1,5 +1,5 @@
 import { FolderGit2Icon, FolderGitIcon, FolderIcon, HistoryIcon } from "lucide-react";
-import { memo, useMemo } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 
 import {
   resolveCurrentWorkspaceLabel,
@@ -26,6 +26,9 @@ interface BranchToolbarEnvModeSelectorProps {
   onEnvModeChange: (mode: EnvMode) => void;
   previousWorktreeLabel?: string | null;
   onUsePreviousWorktree?: () => void;
+  openRequestId?: number | null;
+  onPickerClose?: () => void;
+  onOpenRequestHandled?: (requestId: number) => void;
 }
 
 export const BranchToolbarEnvModeSelector = memo(function BranchToolbarEnvModeSelector({
@@ -35,7 +38,19 @@ export const BranchToolbarEnvModeSelector = memo(function BranchToolbarEnvModeSe
   onEnvModeChange,
   previousWorktreeLabel,
   onUsePreviousWorktree,
+  openRequestId,
+  onPickerClose,
+  onOpenRequestHandled,
 }: BranchToolbarEnvModeSelectorProps) {
+  const [open, setOpen] = useState(false);
+  const openedFromRequestRef = useRef(false);
+  useEffect(() => {
+    if (openRequestId !== null && openRequestId !== undefined) {
+      openedFromRequestRef.current = true;
+      setOpen(true);
+      onOpenRequestHandled?.(openRequestId);
+    }
+  }, [onOpenRequestHandled, openRequestId]);
   const showPreviousWorktree = Boolean(previousWorktreeLabel && onUsePreviousWorktree);
   const envModeItems = useMemo(
     () => [
@@ -72,6 +87,14 @@ export const BranchToolbarEnvModeSelector = memo(function BranchToolbarEnvModeSe
   return (
     <Select
       modal={false}
+      open={open}
+      onOpenChange={(nextOpen) => {
+        setOpen(nextOpen);
+        if (!nextOpen && openedFromRequestRef.current) {
+          openedFromRequestRef.current = false;
+          onPickerClose?.();
+        }
+      }}
       value={effectiveEnvMode}
       onValueChange={(value: string | null) => {
         if (value === PREVIOUS_WORKTREE_SELECT_VALUE) {

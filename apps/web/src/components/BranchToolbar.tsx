@@ -11,6 +11,7 @@ import {
 } from "lucide-react";
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
+import type { ComposerContextPicker } from "../composer-logic";
 import { useComposerDraftStore, type DraftId } from "../composerDraftStore";
 import { useProject, useThread, useThreadShellsForProjectRefs } from "../state/entities";
 import { useIsMobile } from "../hooks/useMediaQuery";
@@ -57,6 +58,8 @@ interface BranchToolbarProps {
   onComposerFocusRequest?: () => void;
   availableEnvironments?: readonly EnvironmentOption[];
   onEnvironmentChange?: (environmentId: EnvironmentId) => void;
+  contextPickerRequest?: { readonly picker: ComposerContextPicker; readonly id: number } | null;
+  onContextPickerRequestHandled?: (requestId: number) => void;
 }
 
 interface MobileRunContextSelectorProps {
@@ -72,6 +75,9 @@ interface MobileRunContextSelectorProps {
   onEnvModeChange: (mode: EnvMode) => void;
   previousWorktreeLabel: string | null;
   onUsePreviousWorktree: () => void;
+  openRequestId?: number | null;
+  onPickerClose?: () => void;
+  onOpenRequestHandled?: (requestId: number) => void;
 }
 
 const MobileRunContextSelector = memo(function MobileRunContextSelector({
@@ -87,7 +93,19 @@ const MobileRunContextSelector = memo(function MobileRunContextSelector({
   onEnvModeChange,
   previousWorktreeLabel,
   onUsePreviousWorktree,
+  openRequestId,
+  onPickerClose,
+  onOpenRequestHandled,
 }: MobileRunContextSelectorProps) {
+  const [open, setOpen] = useState(false);
+  const openedFromRequestRef = useRef(false);
+  useEffect(() => {
+    if (openRequestId !== null && openRequestId !== undefined) {
+      openedFromRequestRef.current = true;
+      setOpen(true);
+      onOpenRequestHandled?.(openRequestId);
+    }
+  }, [onOpenRequestHandled, openRequestId]);
   const activeEnvironment = useMemo(
     () => availableEnvironments?.find((env) => env.environmentId === environmentId) ?? null,
     [availableEnvironments, environmentId],
@@ -103,7 +121,7 @@ const MobileRunContextSelector = memo(function MobileRunContextSelector({
     : effectiveEnvMode === "worktree"
       ? resolveEnvModeLabel("worktree")
       : resolveCurrentWorkspaceLabel(activeWorktreePath);
-  const isLocked = envLocked || envModeLocked;
+  const isLocked = envLocked && envModeLocked;
   const EnvironmentIcon = activeEnvironment?.isPrimary ? MonitorIcon : CloudIcon;
   const icon = showEnvironmentIndicator ? (
     // Button's base styles apply `-mx-0.5` to descendant SVGs, which eats 4px
@@ -133,7 +151,16 @@ const MobileRunContextSelector = memo(function MobileRunContextSelector({
   }
 
   return (
-    <Menu>
+    <Menu
+      open={open}
+      onOpenChange={(nextOpen) => {
+        setOpen(nextOpen);
+        if (!nextOpen && openedFromRequestRef.current) {
+          openedFromRequestRef.current = false;
+          onPickerClose?.();
+        }
+      }}
+    >
       <MenuTrigger
         render={<Button variant="ghost" size="xs" />}
         className="min-w-0 max-w-[48%] flex-1 justify-start text-muted-foreground/70 hover:text-foreground/80 md:hidden"
@@ -389,6 +416,8 @@ export const BranchToolbar = memo(function BranchToolbar({
   onComposerFocusRequest,
   availableEnvironments,
   onEnvironmentChange,
+  contextPickerRequest,
+  onContextPickerRequestHandled,
 }: BranchToolbarProps) {
   const threadRef = useMemo(
     () => scopeThreadRef(environmentId, threadId),
@@ -485,6 +514,16 @@ export const BranchToolbar = memo(function BranchToolbar({
           onEnvModeChange={onEnvModeChange}
           previousWorktreeLabel={previousWorktreeLabel}
           onUsePreviousWorktree={onUsePreviousWorktree}
+          openRequestId={
+            contextPickerRequest?.picker === "environment" ||
+            contextPickerRequest?.picker === "worktree"
+              ? contextPickerRequest.id
+              : null
+          }
+          {...(onComposerFocusRequest ? { onPickerClose: onComposerFocusRequest } : {})}
+          {...(onContextPickerRequestHandled
+            ? { onOpenRequestHandled: onContextPickerRequestHandled }
+            : {})}
         />
       ) : (
         <div className="flex min-w-0 flex-1 items-center gap-1">
@@ -495,6 +534,13 @@ export const BranchToolbar = memo(function BranchToolbar({
                 environmentId={environmentId}
                 availableEnvironments={availableEnvironments}
                 {...(showEnvironmentPicker && onEnvironmentChange ? { onEnvironmentChange } : {})}
+                openRequestId={
+                  contextPickerRequest?.picker === "environment" ? contextPickerRequest.id : null
+                }
+                {...(onComposerFocusRequest ? { onPickerClose: onComposerFocusRequest } : {})}
+                {...(onContextPickerRequestHandled
+                  ? { onOpenRequestHandled: onContextPickerRequestHandled }
+                  : {})}
               />
               {showGitControls ? (
                 <Separator
@@ -513,6 +559,13 @@ export const BranchToolbar = memo(function BranchToolbar({
               onEnvModeChange={onEnvModeChange}
               previousWorktreeLabel={previousWorktreeLabel}
               onUsePreviousWorktree={onUsePreviousWorktree}
+              openRequestId={
+                contextPickerRequest?.picker === "worktree" ? contextPickerRequest.id : null
+              }
+              {...(onComposerFocusRequest ? { onPickerClose: onComposerFocusRequest } : {})}
+              {...(onContextPickerRequestHandled
+                ? { onOpenRequestHandled: onContextPickerRequestHandled }
+                : {})}
             />
           ) : null}
         </div>
@@ -532,6 +585,10 @@ export const BranchToolbar = memo(function BranchToolbar({
           onStartFromOriginChange={onStartFromOriginChange}
           {...(onCheckoutPullRequestRequest ? { onCheckoutPullRequestRequest } : {})}
           {...(onComposerFocusRequest ? { onComposerFocusRequest } : {})}
+          openRequestId={contextPickerRequest?.picker === "branch" ? contextPickerRequest.id : null}
+          {...(onContextPickerRequestHandled
+            ? { onOpenRequestHandled: onContextPickerRequestHandled }
+            : {})}
         />
       ) : null}
     </div>
