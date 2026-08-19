@@ -48,6 +48,7 @@ interface ComposerCommandPopoverProps {
 
 function PopoverSurface(props: { readonly children: React.ReactNode; readonly style?: ViewStyle }) {
   const tintColor = useThemeColor("--color-glass-surface");
+  const fallbackBackground = useThemeColor("--color-card");
   const baseStyle: ViewStyle = {
     borderRadius: 16,
     overflow: "hidden",
@@ -55,7 +56,12 @@ function PopoverSurface(props: { readonly children: React.ReactNode; readonly st
   };
 
   return (
-    <GlassSurface glassEffectStyle="clear" tintColor={tintColor} style={baseStyle}>
+    <GlassSurface
+      glassEffectStyle="regular"
+      tintColor={tintColor}
+      fallbackStyle={{ backgroundColor: fallbackBackground }}
+      style={baseStyle}
+    >
       {props.children}
     </GlassSurface>
   );
