@@ -1,6 +1,6 @@
 import type { EnvironmentId } from "@t3tools/contracts";
 import { CloudIcon, MonitorIcon } from "lucide-react";
-import { memo, useMemo } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 
 import type { EnvironmentOption } from "./BranchToolbar.logic";
 import {
@@ -20,6 +20,9 @@ interface BranchToolbarEnvironmentSelectorProps {
   // Absent when there is only one environment to show: the indicator still
   // renders (as a static label) so remote projects are always identifiable.
   onEnvironmentChange?: (environmentId: EnvironmentId) => void;
+  openRequestId?: number | null;
+  onPickerClose?: () => void;
+  onOpenRequestHandled?: (requestId: number) => void;
 }
 
 export const BranchToolbarEnvironmentSelector = memo(function BranchToolbarEnvironmentSelector({
@@ -27,7 +30,19 @@ export const BranchToolbarEnvironmentSelector = memo(function BranchToolbarEnvir
   environmentId,
   availableEnvironments,
   onEnvironmentChange,
+  openRequestId,
+  onPickerClose,
+  onOpenRequestHandled,
 }: BranchToolbarEnvironmentSelectorProps) {
+  const [open, setOpen] = useState(false);
+  const openedFromRequestRef = useRef(false);
+  useEffect(() => {
+    if (openRequestId !== null && openRequestId !== undefined) {
+      openedFromRequestRef.current = true;
+      setOpen(true);
+      onOpenRequestHandled?.(openRequestId);
+    }
+  }, [onOpenRequestHandled, openRequestId]);
   const activeEnvironment = useMemo(() => {
     return availableEnvironments.find((env) => env.environmentId === environmentId) ?? null;
   }, [availableEnvironments, environmentId]);
@@ -75,6 +90,14 @@ export const BranchToolbarEnvironmentSelector = memo(function BranchToolbarEnvir
   return (
     <Select
       modal={false}
+      open={open}
+      onOpenChange={(nextOpen) => {
+        setOpen(nextOpen);
+        if (!nextOpen && openedFromRequestRef.current) {
+          openedFromRequestRef.current = false;
+          onPickerClose?.();
+        }
+      }}
       value={environmentId}
       onValueChange={(value) => onEnvironmentChange(value as EnvironmentId)}
       items={environmentItems}

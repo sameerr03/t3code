@@ -81,6 +81,7 @@ import { readLocalApi } from "../localApi";
 import { useDiffPanelStore } from "../diffPanelStore";
 import {
   collapseExpandedComposerCursor,
+  type ComposerContextPicker,
   parseStandaloneComposerSlashCommand,
 } from "../composer-logic";
 import {
@@ -1350,6 +1351,18 @@ function ChatViewContent(props: ChatViewProps) {
   const composerElementContextsRef = useRef<ElementContextDraft[]>([]);
   const localComposerRef = useRef<ChatComposerHandle | null>(null);
   const composerRef = useComposerHandleContext() ?? localComposerRef;
+  const contextPickerRequestIdRef = useRef(0);
+  const [contextPickerRequest, setContextPickerRequest] = useState<{
+    readonly picker: ComposerContextPicker;
+    readonly id: number;
+  } | null>(null);
+  const requestContextPicker = useCallback((picker: ComposerContextPicker) => {
+    contextPickerRequestIdRef.current += 1;
+    setContextPickerRequest({ picker, id: contextPickerRequestIdRef.current });
+  }, []);
+  const handleContextPickerRequestHandled = useCallback((requestId: number) => {
+    setContextPickerRequest((request) => (request?.id === requestId ? null : request));
+  }, []);
   const [isWorkspaceFileDragActive, setIsWorkspaceFileDragActive] = useState(false);
   const [showScrollToBottom, setShowScrollToBottom] = useState(false);
   const [expandedImage, setExpandedImage] = useState<ExpandedImagePreview | null>(null);
@@ -6535,6 +6548,16 @@ function ChatViewContent(props: ChatViewProps) {
                             keybindings={keybindings}
                             terminalOpen={Boolean(terminalUiState.terminalOpen)}
                             gitCwd={gitCwd}
+                            contextPickerAvailability={{
+                              environment:
+                                showComposerContextStrip && hasMultipleEnvironments && !envLocked,
+                              worktree:
+                                showComposerContextStrip &&
+                                isGitRepo &&
+                                !envLocked &&
+                                !(isServerThread && activeWorktreePath !== null),
+                              branch: showComposerContextStrip && isGitRepo,
+                            }}
                             promptRef={promptRef}
                             composerImagesRef={composerImagesRef}
                             composerTerminalContextsRef={composerTerminalContextsRef}
@@ -6558,6 +6581,7 @@ function ChatViewContent(props: ChatViewProps) {
                             toggleInteractionMode={toggleInteractionMode}
                             handleRuntimeModeChange={handleRuntimeModeChange}
                             handleInteractionModeChange={handleInteractionModeChange}
+                            onContextPickerRequest={requestContextPicker}
                             focusComposer={focusComposer}
                             scheduleComposerFocus={scheduleComposerFocus}
                             setThreadError={setThreadError}
@@ -6597,6 +6621,8 @@ function ChatViewContent(props: ChatViewProps) {
                                   : {})}
                                 {...(hasMultipleEnvironments ? { onEnvironmentChange } : {})}
                                 availableEnvironments={logicalProjectEnvironments}
+                                contextPickerRequest={contextPickerRequest}
+                                onContextPickerRequestHandled={handleContextPickerRequestHandled}
                               />
                             </div>
                           )}
