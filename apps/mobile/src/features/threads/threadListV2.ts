@@ -13,6 +13,7 @@ import type {
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
 import { threadSearchMatchKey } from "@t3tools/client-runtime/state/thread-search";
 import { sortPinnedThreadsByOrderKey } from "@t3tools/client-runtime/state/thread-sort";
+import { hasUnseenCompletion } from "@t3tools/client-runtime/state/thread-unread";
 import type { EnvironmentId, ProjectId } from "@t3tools/contracts";
 
 import type { PendingNewTask } from "../../state/use-pending-new-tasks";
@@ -23,11 +24,11 @@ export { snoozeWakeLabel };
  * Thread List v2 model, ported from the web sidebar v2
  * (apps/web/src/components/Sidebar.logic.ts + SidebarV2.tsx).
  *
- * Four visual states, three colors: color is reserved for "act now"
- * (approval), "in motion" (working), and "broken" (failed). Ready is the
- * unlabeled resting state.
+ * Color is reserved for states that need attention, active work, failures,
+ * and a completed turn the user has not seen yet. Ready is the unlabeled
+ * resting state.
  */
-export type ThreadListV2Status = "approval" | "input" | "working" | "failed" | "ready";
+export type ThreadListV2Status = "approval" | "input" | "working" | "failed" | "done" | "ready";
 export type ThreadListV2SwipeAction = "archive" | "settle" | "unsettle" | "snooze" | "unsnooze";
 
 export function resolveThreadListV2SnoozeMenuSelection(input: {
@@ -126,7 +127,11 @@ export function resolveThreadListV2Enabled(input: {
 }
 
 export function resolveThreadListV2Status(
-  thread: Pick<EnvironmentThreadShell, "hasPendingApprovals" | "hasPendingUserInput" | "session">,
+  thread: Pick<
+    EnvironmentThreadShell,
+    "hasPendingApprovals" | "hasPendingUserInput" | "latestTurn" | "session"
+  >,
+  lastVisitedAt?: string | null,
 ): ThreadListV2Status {
   if (thread.hasPendingApprovals) {
     return "approval";
@@ -139,6 +144,9 @@ export function resolveThreadListV2Status(
   }
   if (thread.session?.status === "error") {
     return "failed";
+  }
+  if (hasUnseenCompletion({ latestTurn: thread.latestTurn, lastVisitedAt })) {
+    return "done";
   }
   return "ready";
 }

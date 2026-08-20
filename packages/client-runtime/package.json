@@ -143,6 +143,10 @@
       "types": "./src/state/threadSearch.ts",
       "default": "./src/state/threadSearch.ts"
     },
+    "./state/thread-unread": {
+      "types": "./src/state/threadUnread.ts",
+      "default": "./src/state/threadUnread.ts"
+    },
     "./state/vcs": {
       "types": "./src/state/vcs.ts",
       "default": "./src/state/vcs.ts"

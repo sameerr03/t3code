@@ -30,13 +30,14 @@ import { AppText as Text } from "../../components/AppText";
 import { EmptyState } from "../../components/EmptyState";
 import type { WorkspaceEnvironment, WorkspaceState } from "../../state/workspaceModel";
 import type { SavedRemoteConnection } from "../../lib/connection";
-import { scopedProjectKey } from "../../lib/scopedEntities";
+import { scopedProjectKey, scopedThreadKey } from "../../lib/scopedEntities";
 import { NATIVE_LIQUID_GLASS_SUPPORTED } from "../../native/native-glass";
 import { mobilePreferencesAtom, updateMobilePreferencesAtom } from "../../state/preferences";
 import { useThreadSearch } from "../../state/queries";
 import { useThreadListV2Enabled } from "../threads/use-thread-list-v2-enabled";
 import { environmentServerConfigsAtom } from "../../state/server";
 import type { PendingNewTask } from "../../state/use-pending-new-tasks";
+import { useThreadLastVisitedAtByKey } from "../../state/thread-visits";
 import {
   PendingTaskListRow,
   ThreadListGroupHeader,
@@ -203,6 +204,7 @@ function HomeTopContentSpacer() {
 /* ─── Main screen ────────────────────────────────────────────────────── */
 
 export function HomeScreen(props: HomeScreenProps) {
+  const threadLastVisitedAtByKey = useThreadLastVisitedAtByKey();
   const [groupDisplayStates, setGroupDisplayStates] = useState<
     ReadonlyMap<string, HomeGroupDisplayState>
   >(() => new Map());
@@ -803,6 +805,7 @@ export function HomeScreen(props: HomeScreenProps) {
       return (
         <ThreadListV2Row
           thread={thread}
+          lastVisitedAt={threadLastVisitedAtByKey[scopedThreadKey(thread.environmentId, thread.id)]}
           variant={item.item.variant}
           snoozed={item.item.snoozed}
           pinned={item.item.pinned}
@@ -900,6 +903,7 @@ export function HomeScreen(props: HomeScreenProps) {
       v2ProjectTitleByProjectKey,
       props.searchQuery,
       nowMinute,
+      threadLastVisitedAtByKey,
     ],
   );
   const v2KeyExtractor = useCallback((item: ThreadListV2ListItem) => item.key, []);
@@ -917,6 +921,7 @@ export function HomeScreen(props: HomeScreenProps) {
       searchQuery: props.searchQuery,
       snoozePresetMinute: nowMinute,
       threadSearchMatchByKey,
+      threadLastVisitedAtByKey,
     }),
     [
       projectByKey,
@@ -926,6 +931,7 @@ export function HomeScreen(props: HomeScreenProps) {
       serverConfigs,
       nowMinute,
       threadSearchMatchByKey,
+      threadLastVisitedAtByKey,
       v2ProjectTitleByProjectKey,
     ],
   );

@@ -52,12 +52,17 @@ const MONO_FONT = Platform.select({
 // Live Activity/widgets (amber approval, indigo input, sky working) so a
 // thread reads the same color everywhere it surfaces.
 const STATUS_LABEL_BY_STATUS: Partial<
-  Record<ThreadListV2Status, { label: string; className: string }>
+  Record<ThreadListV2Status, { label: string; className: string; icon?: "checkmark" }>
 > = {
   approval: { label: "Approval", className: "text-amber-700 dark:text-amber-300" },
   input: { label: "Input", className: "text-indigo-600 dark:text-indigo-300" },
   working: { label: "Working", className: "text-sky-600 dark:text-sky-400" },
   failed: { label: "Failed", className: "text-red-700 dark:text-red-300" },
+  done: {
+    label: "Done",
+    className: "text-emerald-700 dark:text-emerald-300",
+    icon: "checkmark",
+  },
 };
 
 function threadTimeLabel(thread: EnvironmentThreadShell): string {
@@ -338,6 +343,8 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
   /** Highlights the thread open in the detail pane (iPad split view). The
       compact Home list never sets it — phones navigate away on select. */
   readonly selected?: boolean;
+  /** Device-local watermark for unread completion state. */
+  readonly lastVisitedAt?: string;
   /** Override for narrow panes (iPad sidebar); defaults to window width. */
   readonly fullSwipeWidth?: number;
   readonly onSelectThread: (thread: EnvironmentThreadShell) => void;
@@ -417,11 +424,12 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
   const drawerColor = useThemeColor("--color-drawer");
   const pressedBackgroundColor = useThemeColor("--color-subtle");
   const selectedBackgroundColor = useThemeColor("--color-user-bubble");
+  const selectedForegroundColor = useThemeColor("--color-user-bubble-foreground");
   const pinTintColor = useThemeColor("--color-foreground-muted");
   const sidebarPane = props.pane === "sidebar";
   const selected = props.selected === true;
 
-  const status = resolveThreadListV2Status(thread);
+  const status = resolveThreadListV2Status(thread, props.lastVisitedAt);
   const statusLabel = STATUS_LABEL_BY_STATUS[status];
   const timeLabel = threadTimeLabel(thread);
 
@@ -690,16 +698,26 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
         {pinnedRow ? (
           <SymbolView name="pin" size={11} tintColor={pinTintColor} type="monochrome" />
         ) : null}
-        <Text
-          className={cn(
-            "text-xs tabular-nums",
-            selected
-              ? "text-user-bubble-foreground"
-              : (statusLabel?.className ?? "text-foreground-tertiary"),
-          )}
-        >
-          {statusLabel?.label ?? timeLabel}
-        </Text>
+        <View className="flex-row items-center gap-1">
+          {statusLabel?.icon ? (
+            <SymbolView
+              name={statusLabel.icon}
+              size={10}
+              tintColor={selected ? selectedForegroundColor : "#10b981"}
+              type="monochrome"
+            />
+          ) : null}
+          <Text
+            className={cn(
+              "text-xs tabular-nums",
+              selected
+                ? "text-user-bubble-foreground"
+                : (statusLabel?.className ?? "text-foreground-tertiary"),
+            )}
+          >
+            {statusLabel?.label ?? timeLabel}
+          </Text>
+        </View>
       </View>
       <Text
         className={cn(

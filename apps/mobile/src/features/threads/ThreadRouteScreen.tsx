@@ -13,7 +13,7 @@ import {
   threadHasOlderTurns,
 } from "@t3tools/client-runtime/state/threads";
 import { projectScriptCwd, projectScriptRuntimeEnv } from "@t3tools/shared/projectScripts";
-import { Platform, ScrollView, View } from "react-native";
+import { AppState, Platform, ScrollView, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useWorkspaceState } from "../../state/workspace";
 import { useEnvironmentQuery } from "../../state/query";
@@ -63,6 +63,8 @@ import { useSelectedThreadRequests } from "../../state/use-selected-thread-reque
 import { useSelectedThreadWorktree } from "../../state/use-selected-thread-worktree";
 import { useThreadComposerState } from "../../state/use-thread-composer-state";
 import { threadEnvironment } from "../../state/threads";
+import { markThreadVisited } from "../../state/thread-visits";
+import { threadVisitWatermark } from "../../state/thread-visits.logic";
 import { projectThreadContentPresentation } from "./threadContentPresentation";
 import {
   useAdaptiveWorkspaceLayout,
@@ -221,6 +223,20 @@ function ThreadRouteContent(
   const threadId = firstRouteParam(params.threadId);
   const routeThreadIdentity =
     environmentIdRaw !== null && threadId !== null ? `${environmentIdRaw}:${threadId}` : null;
+  const [appIsActive, setAppIsActive] = useState(AppState.currentState === "active");
+  useEffect(() => {
+    const subscription = AppState.addEventListener("change", (state) => {
+      setAppIsActive(state === "active");
+    });
+    return () => subscription.remove();
+  }, []);
+  const visitWatermark = selectedThread === null ? null : threadVisitWatermark(selectedThread);
+  useFocusEffect(
+    useCallback(() => {
+      if (!appIsActive || routeThreadIdentity === null || visitWatermark === null) return;
+      markThreadVisited(routeThreadIdentity, visitWatermark);
+    }, [appIsActive, routeThreadIdentity, visitWatermark]),
+  );
   const [inspectorSelection, setInspectorSelection] = useState<ThreadInspectorSelection | null>(
     () => (props.renderInspector ? { routeThreadIdentity, mode: "route" } : null),
   );
