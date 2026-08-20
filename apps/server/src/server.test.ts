@@ -29,6 +29,7 @@ import {
   ProviderInstanceId,
   ResolvedKeybindingRule,
   ThreadId,
+  type VcsRef,
   WS_METHODS,
   WsRpcGroup,
   EditorId,
@@ -114,6 +115,7 @@ import * as ProjectionSnapshotQuery from "./orchestration/Services/ProjectionSna
 import { SqlitePersistenceMemory } from "./persistence/Layers/Sqlite.ts";
 import { PersistenceSqlError } from "./persistence/Errors.ts";
 import * as ProviderRegistry from "./provider/Services/ProviderRegistry.ts";
+import * as ProviderService from "./provider/Services/ProviderService.ts";
 import { makeManualOnlyProviderMaintenanceCapabilities } from "./provider/providerMaintenance.ts";
 import * as ServerLifecycleEvents from "./serverLifecycleEvents.ts";
 import * as ServerRuntimeStartup from "./serverRuntimeStartup.ts";
@@ -186,6 +188,42 @@ const defaultModelSelection = {
   instanceId: ProviderInstanceId.make("codex"),
   model: "gpt-5-codex",
 } as const;
+
+const worktreeLocalStatus = (refName: string | null, dirty = false) => ({
+  isRepo: true,
+  hasPrimaryRemote: true,
+  isDefaultRef: false,
+  refName,
+  hasWorkingTreeChanges: dirty,
+  workingTree: dirty
+    ? {
+        files: [{ path: "dirty.txt", insertions: 1, deletions: 0 }],
+        insertions: 1,
+        deletions: 0,
+      }
+    : { files: [], insertions: 0, deletions: 0 },
+});
+
+const worktreeStatusLayers = (
+  getStatus: (cwd: string) => ReturnType<typeof worktreeLocalStatus>,
+) => ({
+  vcsDriver: {
+    isInsideWorkTree: () => Effect.succeed(true),
+  },
+  gitManager: {
+    invalidateLocalStatus: () => Effect.void,
+    localStatus: ({ cwd }: { readonly cwd: string }) => Effect.succeed(getStatus(cwd)),
+  },
+});
+
+const worktreeRefs = (refs: ReadonlyArray<VcsRef>) =>
+  Effect.succeed({
+    refs,
+    isRepo: true,
+    hasPrimaryRemote: true,
+    nextCursor: null,
+    totalCount: refs.length,
+  });
 const testEnvironmentDescriptor = {
   environmentId: EnvironmentId.make("environment-test"),
   label: "Test environment",
@@ -269,6 +307,23 @@ const makeDefaultOrchestrationThreadShell = (
     ...overrides,
   };
 };
+
+const makeDefaultOrchestrationShellSnapshot = (threads: OrchestrationThreadShell[]) => ({
+  snapshotSequence: 0,
+  projects: [
+    {
+      id: defaultProjectId,
+      title: "Default Project",
+      workspaceRoot: "/tmp/default-project",
+      defaultModelSelection,
+      scripts: [],
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    },
+  ],
+  threads,
+  updatedAt: "2026-01-01T00:00:00.000Z",
+});
 
 const browserOtlpTracingLayer = Layer.mergeAll(
   FetchHttpClient.layer,
@@ -386,6 +441,7 @@ const buildAppUnderTest = (options?: {
   layers?: {
     keybindings?: Partial<Keybindings.Keybindings["Service"]>;
     providerRegistry?: Partial<ProviderRegistry.ProviderRegistry["Service"]>;
+    providerService?: Partial<ProviderService.ProviderService["Service"]>;
     serverSettings?: Partial<ServerSettings.ServerSettingsService["Service"]>;
     externalLauncher?: Partial<ExternalLauncher.ExternalLauncher["Service"]>;
     vcsDriver?: Partial<VcsDriver.VcsDriver["Service"]>;
@@ -627,18 +683,24 @@ const buildAppUnderTest = (options?: {
         }),
       ),
       Layer.provide(
-        Layer.mock(ProviderRegistry.ProviderRegistry)({
-          getProviders: Effect.succeed([]),
-          refresh: () => Effect.succeed([]),
-          refreshInstance: () => Effect.succeed([]),
-          getProviderMaintenanceCapabilitiesForInstance: (_instanceId, provider) =>
-            Effect.succeed(
-              makeManualOnlyProviderMaintenanceCapabilities({ provider, packageName: null }),
-            ),
-          setProviderMaintenanceActionState: () => Effect.succeed([]),
-          streamChanges: Stream.empty,
-          ...options?.layers?.providerRegistry,
-        }),
+        Layer.mergeAll(
+          Layer.mock(ProviderRegistry.ProviderRegistry)({
+            getProviders: Effect.succeed([]),
+            refresh: () => Effect.succeed([]),
+            refreshInstance: () => Effect.succeed([]),
+            getProviderMaintenanceCapabilitiesForInstance: (_instanceId, provider) =>
+              Effect.succeed(
+                makeManualOnlyProviderMaintenanceCapabilities({ provider, packageName: null }),
+              ),
+            setProviderMaintenanceActionState: () => Effect.succeed([]),
+            streamChanges: Stream.empty,
+            ...options?.layers?.providerRegistry,
+          }),
+          Layer.mock(ProviderService.ProviderService)({
+            stopSession: () => Effect.void,
+            ...options?.layers?.providerService,
+          }),
+        ),
       ),
       Layer.provide(
         Layer.mock(ServerSettings.ServerSettingsService)({
@@ -1003,6 +1065,14 @@ const withWsRpcClient = <A, E, R>(
   wsUrl: string,
   f: (client: WsRpcClient) => Effect.Effect<A, E, R>,
 ) => makeWsRpcClient.pipe(Effect.flatMap(f), Effect.provide(wsRpcProtocolLayer(wsUrl)));
+
+const dispatchThreadLifecycleCommand = (
+  wsUrl: string,
+  command: Extract<OrchestrationCommand, { type: "thread.archive" | "thread.unarchive" }>,
+) =>
+  Effect.scoped(
+    withWsRpcClient(wsUrl, (client) => client[ORCHESTRATION_WS_METHODS.dispatchCommand](command)),
+  );
 
 const appendSessionCookieToWsUrl = (url: string, sessionCookieHeader: string) => {
   const isAbsoluteUrl = /^[a-zA-Z][a-zA-Z\d+.-]*:/.test(url);
@@ -6756,6 +6826,1053 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       const [first] = Array.from(items);
       assert.equal(first?.kind, "project-removed");
       assert.equal(first?.kind === "project-removed" ? first.projectId : null, projectId);
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("removes a clean, unshared worktree after archiving and quiescing its thread", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("thread-archive-worktree");
+      const now = "2026-01-01T00:00:00.000Z";
+      const thread = makeDefaultOrchestrationThreadShell({
+        id: threadId,
+        branch: "feature/archive-worktree",
+        worktreePath: "/tmp/default-project-worktrees/archive-worktree",
+        session: {
+          threadId,
+          status: "ready",
+          providerName: "claudeAgent",
+          runtimeMode: "full-access",
+          activeTurnId: null,
+          lastError: null,
+          updatedAt: now,
+        },
+      });
+      const effects: string[] = [];
+
+      yield* buildAppUnderTest({
+        layers: {
+          ...worktreeStatusLayers(() => worktreeLocalStatus(thread.branch)),
+          gitVcsDriver: {
+            removeWorktree: (input) =>
+              Effect.sync(() => {
+                effects.push(`remove:${input.path}`);
+              }),
+          },
+          providerService: {
+            stopSession: (input) =>
+              Effect.sync(() => {
+                effects.push(`provider.stop:${input.threadId}`);
+              }),
+          },
+          orchestrationEngine: {
+            dispatch: (command) =>
+              Effect.sync(() => {
+                effects.push(`dispatch:${command.type}`);
+                return { sequence: 1 };
+              }),
+          },
+          projectionSnapshotQuery: {
+            getArchivedShellSnapshot: () =>
+              Effect.succeed(makeDefaultOrchestrationShellSnapshot([thread])),
+            getShellSnapshot: () => Effect.succeed(makeDefaultOrchestrationShellSnapshot([thread])),
+            getThreadShellById: () => Effect.succeed(Option.some(thread)),
+          },
+          terminalManager: {
+            close: (input) =>
+              Effect.sync(() => {
+                effects.push(`terminal.close:${input.threadId}`);
+              }),
+          },
+        },
+      });
+
+      const wsUrl = yield* getWsServerUrl("/ws");
+      yield* dispatchThreadLifecycleCommand(wsUrl, {
+        type: "thread.archive",
+        commandId: CommandId.make("cmd-thread-archive-worktree"),
+        threadId,
+      });
+
+      assert.deepEqual(effects, [
+        "dispatch:thread.archive",
+        `provider.stop:${threadId}`,
+        "dispatch:thread.session.stop",
+        `terminal.close:${threadId}`,
+        `remove:${thread.worktreePath}`,
+      ]);
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("leaves a dirty worktree and its thread active without dispatching archive", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("thread-archive-dirty-worktree");
+      const thread = makeDefaultOrchestrationThreadShell({
+        id: threadId,
+        branch: "feature/dirty-worktree",
+        worktreePath: "/tmp/default-project-worktrees/dirty-worktree",
+      });
+      const dispatchedCommands: OrchestrationCommand[] = [];
+
+      yield* buildAppUnderTest({
+        layers: {
+          ...worktreeStatusLayers(() => worktreeLocalStatus(thread.branch, true)),
+          gitVcsDriver: {
+            removeWorktree: () => Effect.die("dirty archive must not attempt worktree removal"),
+          },
+          orchestrationEngine: {
+            dispatch: (command) =>
+              Effect.sync(() => {
+                dispatchedCommands.push(command);
+                return { sequence: 1 };
+              }),
+          },
+          projectionSnapshotQuery: {
+            getShellSnapshot: () => Effect.succeed(makeDefaultOrchestrationShellSnapshot([thread])),
+            getThreadShellById: () => Effect.succeed(Option.some(thread)),
+          },
+        },
+      });
+
+      const wsUrl = yield* getWsServerUrl("/ws");
+      const result = yield* dispatchThreadLifecycleCommand(wsUrl, {
+        type: "thread.archive",
+        commandId: CommandId.make("cmd-thread-archive-dirty-worktree"),
+        threadId,
+      }).pipe(Effect.result);
+
+      assertTrue(result._tag === "Failure");
+      assertTrue(result.failure._tag === "OrchestrationDispatchCommandError");
+      assert.include(result.failure.message, "modified or untracked files");
+      assert.isEmpty(dispatchedCommands);
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("refuses to delete worktrees that cannot be restored to their recorded branch", () =>
+    Effect.gen(function* () {
+      const detachedThread = makeDefaultOrchestrationThreadShell({
+        id: ThreadId.make("thread-archive-detached-worktree"),
+        branch: null,
+        worktreePath: "/tmp/default-project-worktrees/detached-worktree",
+      });
+      const mismatchedThread = makeDefaultOrchestrationThreadShell({
+        id: ThreadId.make("thread-archive-mismatched-worktree"),
+        branch: "feature/recorded",
+        worktreePath: "/tmp/default-project-worktrees/mismatched-worktree",
+      });
+      const dispatchedCommands: OrchestrationCommand[] = [];
+
+      yield* buildAppUnderTest({
+        layers: {
+          ...worktreeStatusLayers((cwd) =>
+            worktreeLocalStatus(cwd === detachedThread.worktreePath ? null : "feature/actual"),
+          ),
+          gitVcsDriver: {
+            removeWorktree: () => Effect.die("unrestorable worktree must not be removed"),
+          },
+          orchestrationEngine: {
+            dispatch: (command) =>
+              Effect.sync(() => {
+                dispatchedCommands.push(command);
+                return { sequence: 1 };
+              }),
+          },
+          projectionSnapshotQuery: {
+            getShellSnapshot: () =>
+              Effect.succeed(
+                makeDefaultOrchestrationShellSnapshot([detachedThread, mismatchedThread]),
+              ),
+          },
+        },
+      });
+
+      const wsUrl = yield* getWsServerUrl("/ws");
+      const archive = (threadId: ThreadId, commandId: string) =>
+        dispatchThreadLifecycleCommand(wsUrl, {
+          type: "thread.archive",
+          commandId: CommandId.make(commandId),
+          threadId,
+        }).pipe(Effect.result);
+      const detachedResult = yield* archive(
+        detachedThread.id,
+        "cmd-thread-archive-detached-worktree",
+      );
+      const mismatchedResult = yield* archive(
+        mismatchedThread.id,
+        "cmd-thread-archive-mismatched-worktree",
+      );
+
+      assertTrue(detachedResult._tag === "Failure");
+      assert.include(detachedResult.failure.message, "branch is unknown");
+      assertTrue(mismatchedResult._tag === "Failure");
+      assert.include(mismatchedResult.failure.message, "feature/actual");
+      assert.isEmpty(dispatchedCommands);
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("recreates a removed worktree before compensating a cleanup failure", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("thread-archive-cleanup-failure");
+      const thread = makeDefaultOrchestrationThreadShell({
+        id: threadId,
+        branch: "feature/archive-cleanup-failure",
+        worktreePath: "/tmp/default-project-worktrees/archive-cleanup-failure",
+      });
+      const dispatchedCommands: OrchestrationCommand[] = [];
+      const effects: string[] = [];
+      let worktreeExists = true;
+
+      yield* buildAppUnderTest({
+        layers: {
+          ...worktreeStatusLayers(() => worktreeLocalStatus(thread.branch)),
+          vcsDriver: {
+            isInsideWorkTree: () => Effect.succeed(worktreeExists),
+            execute: () =>
+              Effect.sync(() => {
+                effects.push("prune");
+                return {
+                  exitCode: ChildProcessSpawner.ExitCode(0),
+                  stdout: "",
+                  stderr: "",
+                  stdoutTruncated: false,
+                  stderrTruncated: false,
+                };
+              }),
+          },
+          gitVcsDriver: {
+            removeWorktree: () =>
+              Effect.sync(() => {
+                worktreeExists = false;
+                effects.push("remove:failed");
+              }).pipe(
+                Effect.andThen(
+                  Effect.fail(
+                    new GitCommandError({
+                      operation: "GitVcsDriver.removeWorktree",
+                      command: "git worktree remove",
+                      cwd: "/tmp/default-project",
+                      exitCode: 128,
+                      detail: "worktree was removed before the command timed out",
+                    }),
+                  ),
+                ),
+              ),
+            listRefs: () =>
+              worktreeRefs([
+                {
+                  name: thread.branch ?? "unexpected",
+                  current: false,
+                  isDefault: false,
+                  worktreePath: thread.worktreePath,
+                },
+              ]),
+            createWorktree: () =>
+              Effect.sync(() => {
+                worktreeExists = true;
+                effects.push("create");
+                return {
+                  worktree: {
+                    path: thread.worktreePath ?? "/tmp/unexpected",
+                    refName: thread.branch ?? "unexpected",
+                  },
+                };
+              }),
+          },
+          orchestrationEngine: {
+            dispatch: (command) =>
+              Effect.sync(() => {
+                dispatchedCommands.push(command);
+                return { sequence: dispatchedCommands.length };
+              }),
+          },
+          projectionSnapshotQuery: {
+            getArchivedShellSnapshot: () =>
+              Effect.succeed(makeDefaultOrchestrationShellSnapshot([thread])),
+            getShellSnapshot: () => Effect.succeed(makeDefaultOrchestrationShellSnapshot([thread])),
+          },
+          terminalManager: {
+            close: () =>
+              Effect.sync(() => {
+                effects.push("terminal.close");
+              }),
+          },
+        },
+      });
+
+      const wsUrl = yield* getWsServerUrl("/ws");
+      const result = yield* dispatchThreadLifecycleCommand(wsUrl, {
+        type: "thread.archive",
+        commandId: CommandId.make("cmd-thread-archive-cleanup-failure"),
+        threadId,
+      }).pipe(Effect.result);
+
+      assertTrue(result._tag === "Failure");
+      assert.include(result.failure.message, "removed before the command timed out");
+      assertTrue(worktreeExists);
+      assert.deepEqual(effects, ["terminal.close", "remove:failed", "create"]);
+      assert.deepEqual(
+        dispatchedCommands.map((command) => command.type),
+        ["thread.archive", "thread.unarchive"],
+      );
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("rechecks worktree ownership and branch immediately before removal", () =>
+    Effect.gen(function* () {
+      const ownershipThread = makeDefaultOrchestrationThreadShell({
+        id: ThreadId.make("thread-archive-ownership-changed"),
+        branch: "feature/ownership-changed",
+        worktreePath: "/tmp/default-project-worktrees/ownership-changed",
+      });
+      const branchThread = makeDefaultOrchestrationThreadShell({
+        id: ThreadId.make("thread-archive-branch-changed"),
+        branch: "feature/branch-recorded",
+        worktreePath: "/tmp/default-project-worktrees/branch-changed",
+      });
+      const localProjectId = ProjectId.make("project-using-worktree-as-local-checkout");
+      const newOwner = makeDefaultOrchestrationThreadShell({
+        id: ThreadId.make("thread-new-worktree-owner"),
+        projectId: localProjectId,
+        branch: ownershipThread.branch,
+        worktreePath: null,
+      });
+      const archived = new Set<ThreadId>();
+      const statusReads = new Map<string, number>();
+      const dispatchedCommands: OrchestrationCommand[] = [];
+      let removeCalls = 0;
+      const shellSnapshot = (threads: OrchestrationThreadShell[]) => {
+        const snapshot = makeDefaultOrchestrationShellSnapshot(threads);
+        return {
+          ...snapshot,
+          projects: [
+            ...snapshot.projects,
+            {
+              ...snapshot.projects[0]!,
+              id: localProjectId,
+              workspaceRoot: ownershipThread.worktreePath ?? "/tmp/unexpected",
+            },
+          ],
+        };
+      };
+
+      yield* buildAppUnderTest({
+        layers: {
+          ...worktreeStatusLayers((cwd) => {
+            const reads = (statusReads.get(cwd) ?? 0) + 1;
+            statusReads.set(cwd, reads);
+            if (cwd === branchThread.worktreePath && reads > 1) {
+              return worktreeLocalStatus("feature/branch-actual");
+            }
+            return worktreeLocalStatus(
+              cwd === ownershipThread.worktreePath ? ownershipThread.branch : branchThread.branch,
+            );
+          }),
+          gitVcsDriver: {
+            listRefs: () =>
+              worktreeRefs(
+                [ownershipThread, branchThread].map((thread) => ({
+                  name: thread.branch ?? "unexpected",
+                  current: false,
+                  isDefault: false,
+                  worktreePath: thread.worktreePath,
+                })),
+              ),
+            removeWorktree: () =>
+              Effect.sync(() => {
+                removeCalls += 1;
+              }),
+          },
+          orchestrationEngine: {
+            dispatch: (command) =>
+              Effect.sync(() => {
+                dispatchedCommands.push(command);
+                if (command.type === "thread.archive") archived.add(command.threadId);
+                if (command.type === "thread.unarchive") archived.delete(command.threadId);
+                return { sequence: dispatchedCommands.length };
+              }),
+          },
+          projectionSnapshotQuery: {
+            getArchivedShellSnapshot: () =>
+              Effect.succeed(
+                makeDefaultOrchestrationShellSnapshot([ownershipThread, branchThread]),
+              ),
+            getShellSnapshot: () =>
+              Effect.succeed(
+                shellSnapshot([
+                  ownershipThread,
+                  branchThread,
+                  ...(archived.has(ownershipThread.id) ? [newOwner] : []),
+                ]),
+              ),
+          },
+          terminalManager: { close: () => Effect.void },
+        },
+      });
+
+      const wsUrl = yield* getWsServerUrl("/ws");
+      const archive = (threadId: ThreadId, commandId: string) =>
+        dispatchThreadLifecycleCommand(wsUrl, {
+          type: "thread.archive",
+          commandId: CommandId.make(commandId),
+          threadId,
+        }).pipe(Effect.result);
+      const ownershipResult = yield* archive(
+        ownershipThread.id,
+        "cmd-thread-archive-ownership-changed",
+      );
+      const branchResult = yield* archive(branchThread.id, "cmd-thread-archive-branch-changed");
+
+      assertTrue(ownershipResult._tag === "Failure");
+      assert.include(ownershipResult.failure.message, "another active thread");
+      assertTrue(branchResult._tag === "Failure");
+      assert.include(branchResult.failure.message, "feature/branch-actual");
+      assert.equal(removeCalls, 0);
+      assert.deepEqual(
+        dispatchedCommands.map((command) => command.type),
+        ["thread.archive", "thread.unarchive", "thread.archive", "thread.unarchive"],
+      );
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("finishes archive cleanup when the requesting RPC is interrupted", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("thread-archive-interrupted-rpc");
+      const thread = makeDefaultOrchestrationThreadShell({
+        id: threadId,
+        branch: "feature/archive-interrupted-rpc",
+        worktreePath: "/tmp/default-project-worktrees/archive-interrupted-rpc",
+      });
+      const removalStarted = yield* Deferred.make<void>();
+      const releaseRemoval = yield* Deferred.make<void>();
+      const removalFinished = yield* Deferred.make<void>();
+      const effects: string[] = [];
+
+      yield* buildAppUnderTest({
+        layers: {
+          ...worktreeStatusLayers(() => worktreeLocalStatus(thread.branch)),
+          gitVcsDriver: {
+            removeWorktree: () =>
+              Effect.gen(function* () {
+                effects.push("remove:start");
+                yield* Deferred.succeed(removalStarted, undefined);
+                yield* Deferred.await(releaseRemoval);
+                effects.push("remove:done");
+                yield* Deferred.succeed(removalFinished, undefined);
+              }),
+          },
+          orchestrationEngine: {
+            dispatch: (command) =>
+              Effect.sync(() => {
+                effects.push(`dispatch:${command.type}`);
+                return { sequence: 1 };
+              }),
+          },
+          projectionSnapshotQuery: {
+            getArchivedShellSnapshot: () =>
+              Effect.succeed(makeDefaultOrchestrationShellSnapshot([thread])),
+            getShellSnapshot: () => Effect.succeed(makeDefaultOrchestrationShellSnapshot([thread])),
+          },
+          terminalManager: {
+            close: () =>
+              Effect.sync(() => {
+                effects.push("terminal.close");
+              }),
+          },
+        },
+      });
+
+      const wsUrl = yield* getWsServerUrl("/ws");
+      const rpcFiber = yield* Effect.forkChild(
+        dispatchThreadLifecycleCommand(wsUrl, {
+          type: "thread.archive",
+          commandId: CommandId.make("cmd-thread-archive-interrupted-rpc"),
+          threadId,
+        }),
+      );
+      yield* Deferred.await(removalStarted);
+      const interruptFiber = yield* Effect.forkChild(Fiber.interrupt(rpcFiber));
+      yield* Effect.yieldNow;
+      assert.deepEqual(effects, ["dispatch:thread.archive", "terminal.close", "remove:start"]);
+
+      yield* Deferred.succeed(releaseRemoval, undefined);
+      yield* Deferred.await(removalFinished);
+      yield* Fiber.join(interruptFiber);
+      assert.deepEqual(effects, [
+        "dispatch:thread.archive",
+        "terminal.close",
+        "remove:start",
+        "remove:done",
+      ]);
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("serializes worktree lifecycle changes across WebSocket clients", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("thread-archive-multi-client");
+      const thread = makeDefaultOrchestrationThreadShell({
+        id: threadId,
+        branch: "feature/archive-multi-client",
+        worktreePath: "/tmp/default-project-worktrees/archive-multi-client",
+      });
+      const removalStarted = yield* Deferred.make<void>();
+      const releaseRemoval = yield* Deferred.make<void>();
+      const effects: string[] = [];
+
+      yield* buildAppUnderTest({
+        layers: {
+          ...worktreeStatusLayers(() => worktreeLocalStatus(thread.branch)),
+          gitVcsDriver: {
+            removeWorktree: () =>
+              Effect.gen(function* () {
+                effects.push("remove:start");
+                yield* Deferred.succeed(removalStarted, undefined);
+                yield* Deferred.await(releaseRemoval);
+                effects.push("remove:done");
+              }),
+          },
+          orchestrationEngine: {
+            dispatch: (command) =>
+              Effect.sync(() => {
+                effects.push(`dispatch:${command.type}`);
+                return { sequence: effects.length };
+              }),
+          },
+          projectionSnapshotQuery: {
+            getArchivedShellSnapshot: () =>
+              Effect.succeed(makeDefaultOrchestrationShellSnapshot([thread])),
+            getShellSnapshot: () => Effect.succeed(makeDefaultOrchestrationShellSnapshot([thread])),
+          },
+          terminalManager: {
+            close: () =>
+              Effect.sync(() => {
+                effects.push("terminal.close");
+              }),
+          },
+        },
+      });
+
+      const wsUrl = yield* getWsServerUrl("/ws");
+      yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (archiveClient) =>
+          withWsRpcClient(wsUrl, (createClient) =>
+            Effect.gen(function* () {
+              const archiveFiber = yield* Effect.forkChild(
+                archiveClient[ORCHESTRATION_WS_METHODS.dispatchCommand]({
+                  type: "thread.archive",
+                  commandId: CommandId.make("cmd-thread-archive-multi-client"),
+                  threadId,
+                }),
+              );
+              yield* Deferred.await(removalStarted);
+              const createFiber = yield* Effect.forkChild(
+                createClient[ORCHESTRATION_WS_METHODS.dispatchCommand]({
+                  type: "thread.create",
+                  commandId: CommandId.make("cmd-thread-create-multi-client"),
+                  threadId: ThreadId.make("thread-created-by-second-client"),
+                  projectId: defaultProjectId,
+                  title: "Second client thread",
+                  modelSelection: defaultModelSelection,
+                  runtimeMode: "full-access",
+                  interactionMode: "default",
+                  branch: null,
+                  worktreePath: null,
+                  createdAt: "2026-01-01T00:00:00.000Z",
+                }),
+              );
+              yield* Effect.yieldNow;
+              assert.deepEqual(effects, [
+                "dispatch:thread.archive",
+                "terminal.close",
+                "remove:start",
+              ]);
+
+              yield* Deferred.succeed(releaseRemoval, undefined);
+              yield* Fiber.join(archiveFiber);
+              yield* Fiber.join(createFiber);
+            }),
+          ),
+        ),
+      );
+
+      assert.deepEqual(effects, [
+        "dispatch:thread.archive",
+        "terminal.close",
+        "remove:start",
+        "remove:done",
+        "dispatch:thread.create",
+      ]);
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("restores an archived thread's worktree before unarchiving it", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("thread-restore-worktree");
+      const thread = makeDefaultOrchestrationThreadShell({
+        id: threadId,
+        branch: "feature/restore-worktree",
+        worktreePath: "/tmp/default-project-worktrees/restore-worktree",
+        archivedAt: "2026-01-02T00:00:00.000Z",
+      });
+      const effects: string[] = [];
+
+      yield* buildAppUnderTest({
+        layers: {
+          ...worktreeStatusLayers(() => worktreeLocalStatus(thread.branch)),
+          gitVcsDriver: {
+            listRefs: () => worktreeRefs([]),
+            createWorktree: (input) =>
+              Effect.sync(() => {
+                effects.push(`create:${input.refName}:${input.path}`);
+                return {
+                  worktree: {
+                    path: input.path ?? "/tmp/unexpected",
+                    refName: input.refName,
+                  },
+                };
+              }),
+          },
+          orchestrationEngine: {
+            dispatch: (command) =>
+              Effect.sync(() => {
+                effects.push(`dispatch:${command.type}`);
+                return { sequence: 1 };
+              }),
+          },
+          projectionSnapshotQuery: {
+            getArchivedShellSnapshot: () =>
+              Effect.succeed(makeDefaultOrchestrationShellSnapshot([thread])),
+            getShellSnapshot: () => Effect.succeed(makeDefaultOrchestrationShellSnapshot([])),
+          },
+        },
+      });
+
+      const wsUrl = yield* getWsServerUrl("/ws");
+      yield* dispatchThreadLifecycleCommand(wsUrl, {
+        type: "thread.unarchive",
+        commandId: CommandId.make("cmd-thread-restore-worktree"),
+        threadId,
+      });
+
+      assert.deepEqual(effects, [
+        `create:${thread.branch}:${thread.worktreePath}`,
+        "dispatch:thread.unarchive",
+      ]);
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("finishes restoring a worktree when the requesting RPC is interrupted", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("thread-unarchive-interrupted-rpc");
+      const thread = makeDefaultOrchestrationThreadShell({
+        id: threadId,
+        branch: "feature/unarchive-interrupted-rpc",
+        worktreePath: "/tmp/default-project-worktrees/unarchive-interrupted-rpc",
+        archivedAt: "2026-01-02T00:00:00.000Z",
+      });
+      const dispatchStarted = yield* Deferred.make<void>();
+      const releaseDispatch = yield* Deferred.make<void>();
+      const dispatchFinished = yield* Deferred.make<void>();
+      const effects: string[] = [];
+
+      yield* buildAppUnderTest({
+        layers: {
+          ...worktreeStatusLayers(() => worktreeLocalStatus(thread.branch)),
+          gitVcsDriver: {
+            listRefs: () => worktreeRefs([]),
+            createWorktree: () =>
+              Effect.sync(() => {
+                effects.push("create");
+                return {
+                  worktree: {
+                    path: thread.worktreePath ?? "/tmp/unexpected",
+                    refName: thread.branch ?? "unexpected",
+                  },
+                };
+              }),
+            removeWorktree: () =>
+              Effect.sync(() => {
+                effects.push("remove");
+              }),
+          },
+          orchestrationEngine: {
+            dispatch: () =>
+              Effect.gen(function* () {
+                effects.push("dispatch:start");
+                yield* Deferred.succeed(dispatchStarted, undefined);
+                yield* Deferred.await(releaseDispatch);
+                effects.push("dispatch:done");
+                yield* Deferred.succeed(dispatchFinished, undefined);
+                return { sequence: 1 };
+              }),
+          },
+          projectionSnapshotQuery: {
+            getArchivedShellSnapshot: () =>
+              Effect.succeed(makeDefaultOrchestrationShellSnapshot([thread])),
+          },
+        },
+      });
+
+      const wsUrl = yield* getWsServerUrl("/ws");
+      const rpcFiber = yield* Effect.forkChild(
+        dispatchThreadLifecycleCommand(wsUrl, {
+          type: "thread.unarchive",
+          commandId: CommandId.make("cmd-thread-unarchive-interrupted-rpc"),
+          threadId,
+        }),
+      );
+      yield* Deferred.await(dispatchStarted);
+      const interruptFiber = yield* Effect.forkChild(Fiber.interrupt(rpcFiber));
+      yield* Effect.yieldNow;
+      assert.deepEqual(effects, ["create", "dispatch:start"]);
+
+      yield* Deferred.succeed(releaseDispatch, undefined);
+      yield* Deferred.await(dispatchFinished);
+      yield* Fiber.join(interruptFiber);
+      assert.deepEqual(effects, ["create", "dispatch:start", "dispatch:done"]);
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("reuses a worktree left behind by an older archive", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("thread-existing-archived-worktree");
+      const thread = makeDefaultOrchestrationThreadShell({
+        id: threadId,
+        branch: "feature/existing-worktree",
+        worktreePath: "/tmp/default-project-worktrees/existing-worktree",
+        archivedAt: "2026-01-02T00:00:00.000Z",
+      });
+      let createCalls = 0;
+      const dispatchedCommands: OrchestrationCommand[] = [];
+
+      yield* buildAppUnderTest({
+        layers: {
+          ...worktreeStatusLayers(() => worktreeLocalStatus(thread.branch)),
+          gitVcsDriver: {
+            listRefs: () =>
+              worktreeRefs([
+                {
+                  name: thread.branch ?? "unexpected",
+                  current: false,
+                  isDefault: false,
+                  worktreePath: thread.worktreePath,
+                },
+              ]),
+            createWorktree: () =>
+              Effect.sync(() => {
+                createCalls += 1;
+                return {
+                  worktree: {
+                    path: thread.worktreePath ?? "/tmp/unexpected",
+                    refName: thread.branch ?? "unexpected",
+                  },
+                };
+              }),
+          },
+          orchestrationEngine: {
+            dispatch: (command) =>
+              Effect.sync(() => {
+                dispatchedCommands.push(command);
+                return { sequence: 1 };
+              }),
+          },
+          projectionSnapshotQuery: {
+            getArchivedShellSnapshot: () =>
+              Effect.succeed(makeDefaultOrchestrationShellSnapshot([thread])),
+            getShellSnapshot: () => Effect.succeed(makeDefaultOrchestrationShellSnapshot([])),
+          },
+        },
+      });
+
+      const wsUrl = yield* getWsServerUrl("/ws");
+      yield* dispatchThreadLifecycleCommand(wsUrl, {
+        type: "thread.unarchive",
+        commandId: CommandId.make("cmd-thread-existing-archived-worktree"),
+        threadId,
+      });
+
+      assert.equal(createCalls, 0);
+      assert.deepEqual(
+        dispatchedCommands.map((command) => command.type),
+        ["thread.unarchive"],
+      );
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("reuses a legacy worktree whose archived thread has no recorded branch", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("thread-existing-worktree-without-branch");
+      const thread = makeDefaultOrchestrationThreadShell({
+        id: threadId,
+        branch: null,
+        worktreePath: "/tmp/default-project-worktrees/existing-without-branch",
+        archivedAt: "2026-01-02T00:00:00.000Z",
+      });
+      const dispatchedCommands: OrchestrationCommand[] = [];
+
+      yield* buildAppUnderTest({
+        layers: {
+          ...worktreeStatusLayers(() => worktreeLocalStatus(thread.branch)),
+          gitVcsDriver: {
+            listRefs: () =>
+              worktreeRefs([
+                {
+                  name: "feature/legacy-worktree",
+                  current: false,
+                  isDefault: false,
+                  worktreePath: thread.worktreePath,
+                },
+              ]),
+            createWorktree: () => Effect.die("existing worktree must be reused"),
+          },
+          orchestrationEngine: {
+            dispatch: (command) =>
+              Effect.sync(() => {
+                dispatchedCommands.push(command);
+                return { sequence: 1 };
+              }),
+          },
+          projectionSnapshotQuery: {
+            getArchivedShellSnapshot: () =>
+              Effect.succeed(makeDefaultOrchestrationShellSnapshot([thread])),
+          },
+        },
+      });
+
+      const wsUrl = yield* getWsServerUrl("/ws");
+      yield* dispatchThreadLifecycleCommand(wsUrl, {
+        type: "thread.unarchive",
+        commandId: CommandId.make("cmd-thread-existing-worktree-without-branch"),
+        threadId,
+      });
+
+      assert.deepEqual(
+        dispatchedCommands.map((command) => command.type),
+        ["thread.meta.update", "thread.unarchive"],
+      );
+      const branchCommand = dispatchedCommands[0];
+      assert.equal(
+        branchCommand?.type === "thread.meta.update" ? branchCommand.branch : null,
+        "feature/legacy-worktree",
+      );
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("rejects restore when the recorded worktree is on a different branch", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("thread-worktree-branch-mismatch");
+      const thread = makeDefaultOrchestrationThreadShell({
+        id: threadId,
+        branch: "feature/expected",
+        worktreePath: "/tmp/default-project-worktrees/branch-mismatch",
+        archivedAt: "2026-01-02T00:00:00.000Z",
+      });
+      const dispatchedCommands: OrchestrationCommand[] = [];
+
+      yield* buildAppUnderTest({
+        layers: {
+          ...worktreeStatusLayers(() => worktreeLocalStatus(thread.branch)),
+          gitVcsDriver: {
+            listRefs: () =>
+              worktreeRefs([
+                {
+                  name: "feature/different",
+                  current: false,
+                  isDefault: false,
+                  worktreePath: thread.worktreePath,
+                },
+              ]),
+          },
+          orchestrationEngine: {
+            dispatch: (command) =>
+              Effect.sync(() => {
+                dispatchedCommands.push(command);
+                return { sequence: 1 };
+              }),
+          },
+          projectionSnapshotQuery: {
+            getArchivedShellSnapshot: () =>
+              Effect.succeed(makeDefaultOrchestrationShellSnapshot([thread])),
+          },
+        },
+      });
+
+      const wsUrl = yield* getWsServerUrl("/ws");
+      const result = yield* dispatchThreadLifecycleCommand(wsUrl, {
+        type: "thread.unarchive",
+        commandId: CommandId.make("cmd-thread-worktree-branch-mismatch"),
+        threadId,
+      }).pipe(Effect.result);
+
+      assertTrue(result._tag === "Failure");
+      assert.include(result.failure.message, "feature/different");
+      assert.isEmpty(dispatchedCommands);
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("removes a newly recreated worktree when unarchive dispatch fails", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("thread-unarchive-dispatch-failure");
+      const thread = makeDefaultOrchestrationThreadShell({
+        id: threadId,
+        branch: "feature/unarchive-dispatch-failure",
+        worktreePath: "/tmp/default-project-worktrees/unarchive-dispatch-failure",
+        archivedAt: "2026-01-02T00:00:00.000Z",
+      });
+      const effects: string[] = [];
+
+      yield* buildAppUnderTest({
+        layers: {
+          ...worktreeStatusLayers(() => worktreeLocalStatus(thread.branch)),
+          gitVcsDriver: {
+            listRefs: () => worktreeRefs([]),
+            createWorktree: (input) =>
+              Effect.sync(() => {
+                effects.push(`create:${input.path}`);
+                return {
+                  worktree: {
+                    path: input.path ?? "/tmp/unexpected",
+                    refName: input.refName,
+                  },
+                };
+              }),
+            removeWorktree: (input) =>
+              Effect.sync(() => {
+                effects.push(`remove:${input.path}`);
+              }),
+          },
+          orchestrationEngine: {
+            dispatch: () =>
+              Effect.sync(() => {
+                effects.push("dispatch:thread.unarchive");
+              }).pipe(
+                Effect.andThen(
+                  Effect.fail(
+                    new PersistenceSqlError({
+                      operation: "test.unarchive",
+                      detail: "unarchive dispatch failed",
+                    }),
+                  ),
+                ),
+              ),
+          },
+          projectionSnapshotQuery: {
+            getArchivedShellSnapshot: () =>
+              Effect.succeed(makeDefaultOrchestrationShellSnapshot([thread])),
+          },
+        },
+      });
+
+      const wsUrl = yield* getWsServerUrl("/ws");
+      const result = yield* dispatchThreadLifecycleCommand(wsUrl, {
+        type: "thread.unarchive",
+        commandId: CommandId.make("cmd-thread-unarchive-dispatch-failure"),
+        threadId,
+      }).pipe(Effect.result);
+
+      assertTrue(result._tag === "Failure");
+      assert.deepEqual(effects, [
+        `create:${thread.worktreePath}`,
+        "dispatch:thread.unarchive",
+        `remove:${thread.worktreePath}`,
+      ]);
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("keeps a shared worktree while another active thread still uses it", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("thread-archive-shared-worktree");
+      const worktreePath = "/tmp/default-project-worktrees/shared-worktree";
+      const thread = makeDefaultOrchestrationThreadShell({
+        id: threadId,
+        branch: "feature/shared-worktree",
+        worktreePath,
+      });
+      const otherThread = makeDefaultOrchestrationThreadShell({
+        id: ThreadId.make("thread-sharing-worktree"),
+        branch: thread.branch,
+        worktreePath,
+      });
+      let removeCalls = 0;
+
+      yield* buildAppUnderTest({
+        layers: {
+          ...worktreeStatusLayers(() => worktreeLocalStatus(thread.branch)),
+          gitVcsDriver: {
+            removeWorktree: () =>
+              Effect.sync(() => {
+                removeCalls += 1;
+              }),
+          },
+          orchestrationEngine: {
+            dispatch: () => Effect.succeed({ sequence: 1 }),
+          },
+          projectionSnapshotQuery: {
+            getShellSnapshot: () =>
+              Effect.succeed(makeDefaultOrchestrationShellSnapshot([thread, otherThread])),
+            getThreadShellById: () => Effect.succeed(Option.some(thread)),
+          },
+          terminalManager: {
+            close: () => Effect.void,
+          },
+        },
+      });
+
+      const wsUrl = yield* getWsServerUrl("/ws");
+      yield* dispatchThreadLifecycleCommand(wsUrl, {
+        type: "thread.archive",
+        commandId: CommandId.make("cmd-thread-archive-shared-worktree"),
+        threadId,
+      });
+
+      assert.equal(removeCalls, 0);
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("rejects archiving a dirty shared worktree without removing it", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("thread-archive-dirty-shared-worktree");
+      const worktreePath = "/tmp/default-project-worktrees/dirty-shared-worktree";
+      const thread = makeDefaultOrchestrationThreadShell({
+        id: threadId,
+        branch: "feature/dirty-shared-worktree",
+        worktreePath,
+      });
+      const otherThread = makeDefaultOrchestrationThreadShell({
+        id: ThreadId.make("thread-sharing-dirty-worktree"),
+        branch: thread.branch,
+        worktreePath,
+      });
+      const dispatchedCommands: OrchestrationCommand[] = [];
+
+      yield* buildAppUnderTest({
+        layers: {
+          ...worktreeStatusLayers(() => worktreeLocalStatus(thread.branch, true)),
+          gitVcsDriver: {
+            removeWorktree: () => Effect.die("shared worktree must not be removed"),
+          },
+          orchestrationEngine: {
+            dispatch: (command) =>
+              Effect.sync(() => {
+                dispatchedCommands.push(command);
+                return { sequence: 1 };
+              }),
+          },
+          projectionSnapshotQuery: {
+            getShellSnapshot: () =>
+              Effect.succeed(makeDefaultOrchestrationShellSnapshot([thread, otherThread])),
+          },
+        },
+      });
+
+      const wsUrl = yield* getWsServerUrl("/ws");
+      const result = yield* dispatchThreadLifecycleCommand(wsUrl, {
+        type: "thread.archive",
+        commandId: CommandId.make("cmd-thread-archive-dirty-shared-worktree"),
+        threadId,
+      }).pipe(Effect.result);
+
+      assertTrue(result._tag === "Failure");
+      assert.include(result.failure.message, "modified or untracked files");
+      assert.isEmpty(dispatchedCommands);
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 

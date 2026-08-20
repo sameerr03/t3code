@@ -77,6 +77,62 @@ function makeSession(status: OrchestrationSession["status"]): OrchestrationSessi
 }
 
 it.layer(NodeServices.layer)("settled thread decider", (it) => {
+  it.effect("keeps archive and turn starts from racing across the archived boundary", () =>
+    Effect.gen(function* () {
+      for (const status of ["starting", "running"] as const) {
+        const error = yield* Effect.flip(
+          decideOrchestrationCommand({
+            command: {
+              type: "thread.archive",
+              commandId: CommandId.make(`cmd-archive-${status}`),
+              threadId: ThreadId.make("thread-1"),
+            },
+            readModel: makeReadModel(null, null, makeSession(status)),
+          }),
+        );
+        expect(error.message).toContain("cannot be archived while its agent is working");
+      }
+
+      const queuedMessage: OrchestrationThread["messages"][number] = {
+        id: MessageId.make("message-queued-for-archive"),
+        role: "user",
+        text: "Continue",
+        turnId: null,
+        streaming: false,
+        createdAt: "1969-12-31T23:59:30.000Z",
+        updatedAt: "1969-12-31T23:59:30.000Z",
+      };
+      const queuedError = yield* decideOrchestrationCommand({
+        command: {
+          type: "thread.archive",
+          commandId: CommandId.make("cmd-archive-queued-turn"),
+          threadId: ThreadId.make("thread-1"),
+        },
+        readModel: makeReadModel(null, null, null, [], [queuedMessage]),
+      }).pipe(Effect.flip);
+      expect(queuedError.message).toContain("has a queued turn");
+
+      const archivedTurnError = yield* decideOrchestrationCommand({
+        command: {
+          type: "thread.turn.start",
+          commandId: CommandId.make("cmd-turn-start-archived"),
+          threadId: ThreadId.make("thread-1"),
+          message: {
+            messageId: MessageId.make("message-turn-start-archived"),
+            role: "user",
+            text: "Continue",
+            attachments: [],
+          },
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          createdAt: NOW,
+        },
+        readModel: makeReadModel(null, NOW),
+      }).pipe(Effect.flip);
+      expect(archivedTurnError.message).toContain("already archived");
+    }),
+  );
+
   it.effect("settles awake threads without a redundant wake and re-emits idempotently", () =>
     Effect.gen(function* () {
       const event = yield* decideOrchestrationCommand({
