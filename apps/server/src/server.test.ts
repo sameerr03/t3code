@@ -8549,7 +8549,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
           (input: Parameters<GitVcsDriver.GitVcsDriver["Service"]["createWorktree"]>[0]) =>
             Effect.succeed({
               worktree: {
-                path: "/tmp/fork-worktree",
+                path: input.path ?? "/tmp/unexpected-fork-worktree",
                 refName: input.newRefName ?? input.refName,
               },
             }),
@@ -8676,23 +8676,22 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
           ),
         );
 
-        assert.equal(result.worktreePath, "/tmp/fork-worktree");
         assert.equal(result.branch.startsWith("t3/fork-"), true);
         assert.deepEqual(createWorktree.mock.calls[0]?.[0], {
           cwd: "/tmp/project",
           refName: "feature/source",
           newRefName: result.branch,
-          path: null,
+          path: result.worktreePath,
         });
         assert.deepEqual(restoreCheckpoint.mock.calls[0]?.[0], {
-          cwd: "/tmp/fork-worktree",
+          cwd: result.worktreePath,
           checkpointRef: checkpointRefForThreadTurn(source.id, 1),
         });
         assert.deepEqual(forkConversation.mock.calls[0]?.[0], {
           sourceThreadId: source.id,
           targetThreadId: result.threadId,
           lastTurnId: TurnId.make("turn-fork-source"),
-          cwd: "/tmp/fork-worktree",
+          cwd: result.worktreePath,
           runtimeMode: "full-access",
         });
         assert.deepEqual(
@@ -8721,14 +8720,14 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
           ),
         );
         assert.deepEqual(restoreCheckpoint.mock.calls[1]?.[0], {
-          cwd: "/tmp/fork-worktree",
+          cwd: editedMidThread.worktreePath,
           checkpointRef: checkpointRefForThreadTurn(source.id, 1),
         });
         assert.deepEqual(forkConversation.mock.calls[1]?.[0], {
           sourceThreadId: source.id,
           targetThreadId: editedMidThread.threadId,
           lastTurnId: TurnId.make("turn-fork-source"),
-          cwd: "/tmp/fork-worktree",
+          cwd: editedMidThread.worktreePath,
           runtimeMode: "full-access",
         });
 
@@ -8742,9 +8741,8 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
             }),
           ),
         );
-        assert.equal(edited.worktreePath, "/tmp/fork-worktree");
         assert.deepEqual(restoreCheckpoint.mock.calls[2]?.[0], {
-          cwd: "/tmp/fork-worktree",
+          cwd: edited.worktreePath,
           checkpointRef: checkpointRefForThreadTurn(source.id, 0),
         });
         assert.equal(
@@ -8764,14 +8762,14 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
           ),
         );
         assert.deepEqual(restoreCheckpoint.mock.calls[3]?.[0], {
-          cwd: "/tmp/fork-worktree",
+          cwd: editedFailedTurn.worktreePath,
           checkpointRef: checkpointRefForThreadTurn(source.id, 2),
         });
         assert.deepEqual(forkConversation.mock.calls[2]?.[0], {
           sourceThreadId: source.id,
           targetThreadId: editedFailedTurn.threadId,
           lastTurnId: TurnId.make("turn-fork-source-2"),
-          cwd: "/tmp/fork-worktree",
+          cwd: editedFailedTurn.worktreePath,
           runtimeMode: "full-access",
         });
       }).pipe(Effect.provide(NodeHttpServer.layerTest)),
@@ -8800,6 +8798,24 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
           stderrTruncated: false,
         }),
       );
+      const createWorktreeError = new GitCommandError({
+        operation: "GitVcsDriver.createWorktree",
+        command: "git worktree add",
+        cwd: "/tmp/project",
+        detail: "Git command timed out after creating the worktree",
+      });
+      let createWorktreeFails = true;
+      const createWorktree = vi.fn(
+        (input: Parameters<GitVcsDriver.GitVcsDriver["Service"]["createWorktree"]>[0]) =>
+          createWorktreeFails
+            ? Effect.fail(createWorktreeError)
+            : Effect.succeed({
+                worktree: {
+                  path: input.path ?? "/tmp/unexpected-fork-worktree",
+                  refName: input.newRefName ?? input.refName,
+                },
+              }),
+      );
       let restoreResult = false;
       const localStatus = {
         isRepo: true,
@@ -8827,13 +8843,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
             localStatus: () => Effect.succeed(localStatus),
           },
           gitVcsDriver: {
-            createWorktree: (input) =>
-              Effect.succeed({
-                worktree: {
-                  path: "/tmp/fork-worktree",
-                  refName: input.newRefName ?? input.refName,
-                },
-              }),
+            createWorktree,
             removeWorktree,
           },
           vcsStatusBroadcaster: {
@@ -8884,6 +8894,34 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       });
 
       const wsUrl = yield* getWsServerUrl("/ws");
+      const createFailure = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          client[ORCHESTRATION_WS_METHODS.forkThread]({
+            sourceThreadId: source.id,
+            sourceMessageId: MessageId.make("message-fork-assistant"),
+            cut: "through",
+            title: "Fork whose worktree creation times out",
+          }),
+        ).pipe(Effect.result),
+      );
+      assertTrue(createFailure._tag === "Failure");
+      assertTrue(createFailure.failure._tag === "OrchestrationDispatchCommandError");
+      assert.include(createFailure.failure.message, "timed out");
+      assert.deepEqual(dispatchedCommands, []);
+      assert.equal(closeTerminal.mock.calls.length, 0);
+      assert.equal(removeWorktree.mock.calls.length, 1);
+      const timedOutWorktreePath = createWorktree.mock.calls[0]?.[0]?.path;
+      assert(typeof timedOutWorktreePath === "string");
+      assert.deepEqual(removeWorktree.mock.calls[0]?.[0], {
+        cwd: "/tmp/project",
+        path: timedOutWorktreePath,
+        force: true,
+      });
+      assert.equal(deleteBranch.mock.calls.length, 1);
+
+      createWorktreeFails = false;
+      removeWorktree.mockClear();
+      deleteBranch.mockClear();
       const missingCheckpoint = yield* Effect.scoped(
         withWsRpcClient(wsUrl, (client) =>
           client[ORCHESTRATION_WS_METHODS.forkThread]({
@@ -8899,9 +8937,11 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.include(missingCheckpoint.failure.message, "no longer exists");
       assert.deepEqual(dispatchedCommands, []);
       assert.equal(closeTerminal.mock.calls.length, 0);
+      const missingCheckpointWorktreePath = createWorktree.mock.calls[1]?.[0]?.path;
+      assert(typeof missingCheckpointWorktreePath === "string");
       assert.deepEqual(removeWorktree.mock.calls[0]?.[0], {
         cwd: "/tmp/project",
-        path: "/tmp/fork-worktree",
+        path: missingCheckpointWorktreePath,
         force: true,
       });
       assert.equal(deleteBranch.mock.calls.length, 1);
@@ -8932,9 +8972,11 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         ["thread.create", "thread.activity.append", "thread.delete"],
       );
       assert.equal(closeTerminal.mock.calls.length, 1);
+      const nativeForkFailureWorktreePath = createWorktree.mock.calls[2]?.[0]?.path;
+      assert(typeof nativeForkFailureWorktreePath === "string");
       assert.deepEqual(removeWorktree.mock.calls[0]?.[0], {
         cwd: "/tmp/project",
-        path: "/tmp/fork-worktree",
+        path: nativeForkFailureWorktreePath,
         force: true,
       });
       assert.equal(deleteBranch.mock.calls.length, 1);

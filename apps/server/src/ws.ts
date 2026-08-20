@@ -1,3 +1,6 @@
+// @effect-diagnostics nodeBuiltinImport:off
+import * as NodePath from "node:path";
+
 import * as Cause from "effect/Cause";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
@@ -1613,8 +1616,12 @@ const makeWsRpcLayer = (
         const childUuid = yield* randomUUID;
         const childThreadId = ThreadId.make(childUuid);
         const childBranch = `t3/fork-${childUuid.slice(0, 8)}`;
+        const childWorktreePath = NodePath.join(
+          config.worktreesDir,
+          NodePath.basename(project.workspaceRoot),
+          childBranch.replace(/\//g, "-"),
+        );
         let childCreated = false;
-        let childWorktreePath: string | undefined;
         const cleanup = Effect.gen(function* () {
           if (childCreated) {
             yield* terminalManager
@@ -1633,33 +1640,30 @@ const makeWsRpcLayer = (
               Effect.ignoreCause({ log: true }),
             );
           }
-          if (childWorktreePath) {
-            yield* gitWorkflow
-              .removeWorktree({
-                cwd: project.workspaceRoot,
-                path: childWorktreePath,
-                force: true,
-              })
-              .pipe(Effect.ignoreCause({ log: true }));
-            yield* vcsDriver
-              .execute({
-                operation: "WsRpc.forkThread.deleteBranch",
-                cwd: project.workspaceRoot,
-                args: ["branch", "-D", "--", childBranch],
-              })
-              .pipe(Effect.ignoreCause({ log: true }));
-            yield* refreshGitStatus(project.workspaceRoot);
-          }
+          yield* gitWorkflow
+            .removeWorktree({
+              cwd: project.workspaceRoot,
+              path: childWorktreePath,
+              force: true,
+            })
+            .pipe(Effect.ignoreCause({ log: true }));
+          yield* vcsDriver
+            .execute({
+              operation: "WsRpc.forkThread.deleteBranch",
+              cwd: project.workspaceRoot,
+              args: ["branch", "-D", "--", childBranch],
+            })
+            .pipe(Effect.ignoreCause({ log: true }));
+          yield* refreshGitStatus(project.workspaceRoot);
         });
 
         return yield* Effect.gen(function* () {
-          const worktree = yield* gitWorkflow.createWorktree({
+          yield* gitWorkflow.createWorktree({
             cwd: project.workspaceRoot,
             refName: sourceBranch,
             newRefName: childBranch,
-            path: null,
+            path: childWorktreePath,
           });
-          childWorktreePath = worktree.worktree.path;
           const restored = yield* checkpointStore.restoreCheckpoint({
             cwd: childWorktreePath,
             checkpointRef: targetCheckpoint.checkpointRef,
