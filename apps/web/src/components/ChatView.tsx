@@ -230,6 +230,7 @@ import {
 } from "../lib/elementContext";
 import { appendPreviewAnnotationPrompt } from "../lib/previewAnnotation";
 import { appendReviewCommentsToPrompt, type ReviewCommentContext } from "../reviewCommentContext";
+import { buildSelectedMessageReplyInsertion } from "../messageReply";
 import { environmentCatalog } from "../connection/catalog";
 import { selectThreadTerminalUiState, useTerminalUiStateStore } from "../terminalUiStateStore";
 import { useKnownTerminalSessions, useThreadRunningTerminalIds } from "../state/terminalSessions";
@@ -2846,6 +2847,18 @@ function ChatViewContent(props: ChatViewProps) {
   const addTerminalContextToDraft = useCallback(
     (selection: TerminalContextSelection) => {
       composerRef.current?.addTerminalContext(selection);
+    },
+    [composerRef],
+  );
+  const replyToAssistantSelection = useCallback(
+    (selection: string) => {
+      const composer = composerRef.current;
+      if (!composer) return false;
+      const insertion = buildSelectedMessageReplyInsertion(
+        composer.readSnapshot().value,
+        selection,
+      );
+      return insertion.length > 0 && composer.insertTextAtEnd(insertion);
     },
     [composerRef],
   );
@@ -6409,6 +6422,7 @@ function ChatViewContent(props: ChatViewProps) {
                 onOpenTurnDiff={onOpenTurnDiff}
                 revertTurnCountByUserMessageId={revertTurnCountByUserMessageId}
                 onRevertUserMessage={onRevertUserMessage}
+                onReplyToAssistantSelection={replyToAssistantSelection}
                 isRevertingCheckpoint={isRevertingCheckpoint}
                 onImageExpand={onExpandTimelineImage}
                 markdownCwd={gitCwd ?? undefined}

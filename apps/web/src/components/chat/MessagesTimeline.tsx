@@ -218,6 +218,7 @@ interface MessagesTimelineProps {
   onOpenTurnDiff: (turnId: TurnId, filePath?: string) => void;
   revertTurnCountByUserMessageId: Map<MessageId, number>;
   onRevertUserMessage: (messageId: MessageId) => void;
+  onReplyToAssistantSelection: (text: string) => boolean;
   isRevertingCheckpoint: boolean;
   onImageExpand: (preview: ExpandedImagePreview) => void;
   activeThreadEnvironmentId: EnvironmentId;
@@ -264,6 +265,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   onOpenTurnDiff,
   revertTurnCountByUserMessageId,
   onRevertUserMessage,
+  onReplyToAssistantSelection,
   isRevertingCheckpoint,
   onImageExpand,
   activeThreadEnvironmentId,
@@ -426,6 +428,11 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   );
   const [minimapHasPersistentGutter, setMinimapHasPersistentGutter] = useState(false);
   const [minimapHitStripWidth, setMinimapHitStripWidth] = useState(0);
+  const [assistantSelection, setAssistantSelection] = useState<{
+    readonly text: string;
+    readonly left: number;
+    readonly top: number;
+  } | null>(null);
   const handleAnchorReady = useCallback(
     (info: { anchorIndex: number | undefined }) => {
       if (anchorMessageId !== null && info.anchorIndex !== undefined) {
@@ -442,6 +449,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   }, [anchorMessageId, handleAnchorReady, rows]);
 
   const handleScroll = useCallback(() => {
+    setAssistantSelection(null);
     const state = listRef.current?.getState?.();
     const isAtEnd = resolveTimelineIsAtEnd(state, contentInsetEndAdjustment);
     if (isAtEnd !== undefined) {
@@ -470,6 +478,57 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       strip.dataset.inView = inView ? "true" : "false";
     }
   }, [contentInsetEndAdjustment, listRef, minimapItems, minimapStripMap, onIsAtEndChange]);
+
+  const syncAssistantSelection = useCallback(() => {
+    const viewport = timelineViewportElement;
+    const selection = window.getSelection();
+    if (!viewport || !selection || selection.rangeCount === 0 || selection.isCollapsed) {
+      setAssistantSelection(null);
+      return;
+    }
+
+    const selectedText = selection.toString().trim();
+    const anchorElement =
+      selection.anchorNode instanceof Element
+        ? selection.anchorNode
+        : selection.anchorNode?.parentElement;
+    const focusElement =
+      selection.focusNode instanceof Element
+        ? selection.focusNode
+        : selection.focusNode?.parentElement;
+    const anchorMessage = anchorElement?.closest<HTMLElement>(
+      '[data-message-role="assistant"][data-message-id]',
+    );
+    const focusMessage = focusElement?.closest<HTMLElement>(
+      '[data-message-role="assistant"][data-message-id]',
+    );
+    if (
+      selectedText.length === 0 ||
+      !anchorMessage ||
+      anchorMessage !== focusMessage ||
+      !viewport.contains(anchorMessage)
+    ) {
+      setAssistantSelection(null);
+      return;
+    }
+
+    const selectionRect = selection.getRangeAt(0).getBoundingClientRect();
+    const viewportRect = viewport.getBoundingClientRect();
+    const maximumTop = Math.max(8, viewportRect.height - contentInsetEndAdjustment - 40);
+    setAssistantSelection({
+      text: selectedText,
+      left: Math.min(
+        Math.max(selectionRect.left + selectionRect.width / 2 - viewportRect.left, 48),
+        viewportRect.width - 48,
+      ),
+      top: Math.min(Math.max(selectionRect.bottom - viewportRect.top + 8, 8), maximumTop),
+    });
+  }, [contentInsetEndAdjustment, timelineViewportElement]);
+
+  useEffect(() => {
+    document.addEventListener("selectionchange", syncAssistantSelection);
+    return () => document.removeEventListener("selectionchange", syncAssistantSelection);
+  }, [syncAssistantSelection]);
 
   useEffect(() => {
     const frame = requestAnimationFrame(handleScroll);
@@ -609,6 +668,25 @@ export const MessagesTimeline = memo(function MessagesTimeline({
             }
             ListFooterComponent={TIMELINE_LIST_FOOTER}
           />
+          {assistantSelection ? (
+            <Button
+              type="button"
+              data-assistant-selection-reply
+              size="sm"
+              className="absolute z-40 h-8 -translate-x-1/2 gap-1.5 rounded-full px-3 shadow-lg"
+              style={{ left: assistantSelection.left, top: assistantSelection.top }}
+              onPointerDown={(event) => event.preventDefault()}
+              onClick={() => {
+                if (onReplyToAssistantSelection(assistantSelection.text)) {
+                  window.getSelection()?.removeAllRanges();
+                  setAssistantSelection(null);
+                }
+              }}
+            >
+              <MessageCircleIcon className="size-3.5" />
+              Reply
+            </Button>
+          ) : null}
           <TimelineMinimap
             items={minimapItems}
             hasPersistentGutter={minimapHasPersistentGutter}
