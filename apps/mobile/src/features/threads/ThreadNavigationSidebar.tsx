@@ -36,6 +36,7 @@ import { useThreadSearch } from "../../state/queries";
 import { useThreadListV2Enabled } from "./use-thread-list-v2-enabled";
 import { environmentServerConfigsAtom } from "../../state/server";
 import { usePendingNewTasks } from "../../state/use-pending-new-tasks";
+import { useThreadLastVisitedAtByKey } from "../../state/thread-visits";
 import { useWorkspaceState } from "../../state/workspace";
 import { useSavedRemoteConnections } from "../../state/use-remote-environment-registry";
 import { useHardwareKeyboardCommand } from "../keyboard/hardwareKeyboardCommands";
@@ -197,6 +198,7 @@ function ThreadNavigationSidebarPane(
   const { themeAppearance: colorScheme } = useAppearancePreferences();
   const projects = useProjects();
   const threads = useThreadShells();
+  const threadLastVisitedAtByKey = useThreadLastVisitedAtByKey();
   const { environments: workspaceEnvironments, state: catalogState } = useWorkspaceState();
   const { savedConnectionsById } = useSavedRemoteConnections();
   const [headerIsOverContent, setHeaderIsOverContent] = useState(false);
@@ -834,6 +836,7 @@ function ThreadNavigationSidebarPane(
       serverConfigs,
       snoozePresetMinute: nowMinute,
       threadSearchMatchByKey,
+      threadLastVisitedAtByKey,
     }),
     [
       props.selectedThreadKey,
@@ -844,6 +847,7 @@ function ThreadNavigationSidebarPane(
       serverConfigs,
       nowMinute,
       threadSearchMatchByKey,
+      threadLastVisitedAtByKey,
     ],
   );
   const sidebarItemsAreEqual = useCallback(
@@ -940,6 +944,9 @@ function ThreadNavigationSidebarPane(
           return (
             <ThreadListV2Row
               thread={thread}
+              lastVisitedAt={
+                threadLastVisitedAtByKey[scopedThreadKey(thread.environmentId, thread.id)]
+              }
               variant={item.item.variant}
               snoozed={item.item.snoozed}
               pinned={item.item.pinned}
@@ -1141,6 +1148,7 @@ function ThreadNavigationSidebarPane(
       savedConnectionsById,
       serverConfigs,
       threadSearchMatchByKey,
+      threadLastVisitedAtByKey,
       titleRegenerationEnvironmentIds,
       settleThread,
       settlementEnvironmentIds,

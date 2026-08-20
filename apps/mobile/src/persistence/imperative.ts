@@ -1,6 +1,7 @@
 import * as Effect from "effect/Effect";
 
 import { runtime } from "../lib/runtime";
+import * as MobileDatabase from "./mobile-database";
 import * as MobilePreferences from "./mobile-preferences";
 import * as MobileStorage from "./mobile-storage";
 
@@ -14,6 +15,8 @@ export {
 } from "./mobile-storage";
 export { MobileSecureStorageError } from "./mobile-secure-storage";
 
+export type ThreadLastVisitedAtByKey = Readonly<Record<string, string>>;
+
 const runStorage = <A, E>(
   use: (storage: MobileStorage.MobileStorage["Service"]) => Effect.Effect<A, E>,
 ) => runtime.runPromise(MobileStorage.MobileStorage.pipe(Effect.flatMap(use)));
@@ -21,6 +24,10 @@ const runStorage = <A, E>(
 const runPreferences = <A, E>(
   use: (store: MobilePreferences.MobilePreferencesStore["Service"]) => Effect.Effect<A, E>,
 ) => runtime.runPromise(MobilePreferences.MobilePreferencesStore.pipe(Effect.flatMap(use)));
+
+const runDatabase = <A, E>(
+  use: (database: MobileDatabase.MobileDatabase["Service"]) => Effect.Effect<A, E>,
+) => runtime.runPromise(MobileDatabase.MobileDatabase.pipe(Effect.flatMap(use)));
 
 export const loadSavedConnections = () => runStorage((storage) => storage.loadSavedConnections);
 export const saveConnection = (
@@ -51,3 +58,8 @@ export const loadRecentThreadShortcuts = () =>
 export const saveRecentThreadShortcuts = (
   threads: ReadonlyArray<MobileStorage.RecentThreadShortcut>,
 ) => runStorage((storage) => storage.saveRecentThreadShortcuts(threads));
+
+export const loadThreadLastVisitedAtByKey = () =>
+  runDatabase((database) => database.loadThreadLastVisitedAtByKey);
+export const saveThreadLastVisitedAt = (threadKey: string, visitedAt: string) =>
+  runDatabase((database) => database.saveThreadLastVisitedAt(threadKey, visitedAt));

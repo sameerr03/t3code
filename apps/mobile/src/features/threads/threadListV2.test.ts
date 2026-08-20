@@ -150,6 +150,73 @@ describe("resolveThreadListV2Status", () => {
       "ready",
     );
   });
+
+  it("shows Done for a completed turn the device has not seen", () => {
+    const thread = makeThread({
+      id: ThreadId.make("done"),
+      title: "done",
+      latestTurn: {
+        turnId: TurnId.make("turn-done"),
+        state: "completed",
+        requestedAt: "2026-06-01T09:00:00.000Z",
+        startedAt: "2026-06-01T09:00:01.000Z",
+        completedAt: "2026-06-01T09:05:00.000Z",
+        assistantMessageId: null,
+      },
+    });
+
+    expect(resolveThreadListV2Status(thread, "2026-06-01T09:04:00.000Z")).toBe("done");
+    expect(resolveThreadListV2Status(thread, "2026-06-01T09:05:00.000Z")).toBe("ready");
+  });
+
+  it("does not mark old completed threads Done before the device has visited them", () => {
+    const thread = makeThread({
+      id: ThreadId.make("old"),
+      title: "old",
+      latestTurn: {
+        turnId: TurnId.make("turn-old"),
+        state: "completed",
+        requestedAt: "2026-05-01T09:00:00.000Z",
+        startedAt: "2026-05-01T09:00:01.000Z",
+        completedAt: "2026-05-01T09:05:00.000Z",
+        assistantMessageId: null,
+      },
+    });
+
+    expect(resolveThreadListV2Status(thread)).toBe("ready");
+  });
+
+  it("keeps active and failed states above unread completion", () => {
+    const latestTurn = {
+      turnId: TurnId.make("turn-priority"),
+      state: "completed" as const,
+      requestedAt: "2026-06-01T09:00:00.000Z",
+      startedAt: "2026-06-01T09:00:01.000Z",
+      completedAt: "2026-06-01T09:05:00.000Z",
+      assistantMessageId: null,
+    };
+    const session = {
+      threadId: ThreadId.make("priority"),
+      status: "running" as const,
+      providerName: "Codex",
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      runtimeMode: "full-access" as const,
+      activeTurnId: TurnId.make("turn-next"),
+      lastError: null,
+      updatedAt: NOW,
+    };
+    const thread = makeThread({ id: ThreadId.make("priority"), title: "priority", latestTurn });
+
+    expect(resolveThreadListV2Status({ ...thread, session }, "2026-06-01T09:04:00.000Z")).toBe(
+      "working",
+    );
+    expect(
+      resolveThreadListV2Status(
+        { ...thread, session: { ...session, status: "error" } },
+        "2026-06-01T09:04:00.000Z",
+      ),
+    ).toBe("failed");
+  });
 });
 
 describe("resolveThreadListV2SwipeActions", () => {

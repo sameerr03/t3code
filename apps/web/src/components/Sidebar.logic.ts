@@ -12,6 +12,7 @@ import type { ThreadRouteTarget } from "../threadRoutes";
 import { cn } from "../lib/utils";
 import { isLatestTurnSettled } from "../session-logic";
 import { resolveServerBackedAppStageLabel } from "../branding.logic";
+import { hasUnseenCompletion as hasSharedUnseenCompletion } from "@t3tools/client-runtime/state/thread-unread";
 
 export const THREAD_SELECTION_SAFE_SELECTOR = "[data-thread-item], [data-thread-selection-safe]";
 export const THREAD_JUMP_HINT_SHOW_DELAY_MS = 100;
@@ -157,6 +158,13 @@ type ThreadStatusInput = Pick<
   lastVisitedAt?: string | undefined;
 };
 
+export function hasUnseenCompletion(thread: ThreadStatusInput): boolean {
+  return hasSharedUnseenCompletion({
+    latestTurn: thread.latestTurn,
+    lastVisitedAt: thread.lastVisitedAt,
+  });
+}
+
 export interface ThreadJumpHintVisibilityController {
   sync: (shouldShow: boolean) => void;
   dispose: () => void;
@@ -247,17 +255,6 @@ export function useThreadJumpHintVisibility(): {
     showThreadJumpHints,
     updateThreadJumpHintsVisibility,
   };
-}
-
-export function hasUnseenCompletion(thread: ThreadStatusInput): boolean {
-  if (!thread.latestTurn?.completedAt) return false;
-  const completedAt = Date.parse(thread.latestTurn.completedAt);
-  if (Number.isNaN(completedAt)) return false;
-  if (!thread.lastVisitedAt) return false;
-
-  const lastVisitedAt = Date.parse(thread.lastVisitedAt);
-  if (Number.isNaN(lastVisitedAt)) return true;
-  return completedAt > lastVisitedAt;
 }
 
 export function shouldClearThreadSelectionOnMouseDown(target: HTMLElement | null): boolean {

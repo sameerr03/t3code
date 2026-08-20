@@ -5,6 +5,7 @@ const mocks = vi.hoisted(() => {
   const values = new Map<string, string>();
   let preferencesJson: string | null = null;
   let preferencesUpdatedAt = 0;
+  const threadVisits = new Map<string, string>();
   let loadPreferencesFails = false;
   let savePreferencesFails = false;
   return {
@@ -12,6 +13,7 @@ const mocks = vi.hoisted(() => {
       values.clear();
       preferencesJson = null;
       preferencesUpdatedAt = 0;
+      threadVisits.clear();
       loadPreferencesFails = false;
       savePreferencesFails = false;
     },
@@ -54,9 +56,26 @@ const mocks = vi.hoisted(() => {
             : { payload: preferencesJson, updatedAt: preferencesUpdatedAt },
         );
       }),
-      runAsync: vi.fn((_sql: string, payload?: unknown, updatedAt?: unknown) => {
+      getAllAsync: vi.fn((sql: string) => {
+        if (sql.includes("thread_visits")) {
+          return Promise.resolve(
+            Array.from(threadVisits, ([threadKey, visitedAt]) => ({ threadKey, visitedAt })),
+          );
+        }
+        return Promise.resolve([]);
+      }),
+      runAsync: vi.fn((sql: string, payload?: unknown, updatedAt?: unknown) => {
         if (savePreferencesFails) {
           return Promise.reject(new Error("database unavailable"));
+        }
+        if (
+          sql.includes("thread_visits") &&
+          typeof payload === "string" &&
+          typeof updatedAt === "string"
+        ) {
+          const previous = threadVisits.get(payload);
+          if (previous === undefined || updatedAt > previous) threadVisits.set(payload, updatedAt);
+          return Promise.resolve();
         }
         if (typeof payload === "string") {
           preferencesJson = payload;
@@ -97,8 +116,10 @@ vi.mock("react-native", () => ({
 import {
   loadPreferences,
   loadSavedConnections,
+  loadThreadLastVisitedAtByKey,
   saveConnection,
   savePreferencesPatch,
+  saveThreadLastVisitedAt,
 } from "../persistence/imperative";
 import { toStableSavedRemoteConnection } from "./connection";
 
@@ -168,6 +189,30 @@ describe("mobile connection storage", () => {
     );
 
     warn.mockRestore();
+  });
+
+  it("persists device-local thread visit watermarks", async () => {
+    const visits = {
+      "environment-1:thread-1": "2026-08-20T07:00:00.000Z",
+      "environment-2:thread-2": "2026-08-20T07:05:00.000Z",
+    };
+
+    await Promise.all(
+      Object.entries(visits).map(([threadKey, visitedAt]) =>
+        saveThreadLastVisitedAt(threadKey, visitedAt),
+      ),
+    );
+
+    await expect(loadThreadLastVisitedAtByKey()).resolves.toEqual(visits);
+  });
+
+  it("does not move a thread visit watermark backwards", async () => {
+    await saveThreadLastVisitedAt("environment-1:thread-1", "2026-08-20T07:00:00.000Z");
+    await saveThreadLastVisitedAt("environment-1:thread-1", "2026-08-20T06:00:00.000Z");
+
+    await expect(loadThreadLastVisitedAtByKey()).resolves.toEqual({
+      "environment-1:thread-1": "2026-08-20T07:00:00.000Z",
+    });
   });
 
   it("loads legacy preferences when SQLite is unavailable", async () => {

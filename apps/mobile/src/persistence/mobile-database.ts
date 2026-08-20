@@ -52,6 +52,8 @@ const MobileDatabaseOperation = Schema.Literals([
   "inspect-caches",
   "load-preferences",
   "save-preferences",
+  "load-thread-visits",
+  "save-thread-visit",
 ]);
 
 export class MobileDatabaseError extends Schema.TaggedErrorClass<MobileDatabaseError>()(
@@ -224,6 +226,14 @@ export class MobileDatabase extends Context.Service<
       payload: string,
       updatedAt: number,
     ) => Effect.Effect<void, MobileDatabaseError>;
+    readonly loadThreadLastVisitedAtByKey: Effect.Effect<
+      Readonly<Record<string, string>>,
+      MobileDatabaseError
+    >;
+    readonly saveThreadLastVisitedAt: (
+      threadKey: string,
+      visitedAt: string,
+    ) => Effect.Effect<void, MobileDatabaseError>;
   }
 >()("@t3tools/mobile/persistence/MobileDatabase") {}
 
@@ -265,6 +275,11 @@ const makeAvailable = Effect.gen(function* () {
                 payload TEXT NOT NULL,
                 updated_at INTEGER NOT NULL
               );
+
+              CREATE TABLE IF NOT EXISTS thread_visits (
+                thread_key TEXT PRIMARY KEY NOT NULL,
+                visited_at TEXT NOT NULL
+              ) WITHOUT ROWID;
             `);
       });
       if ((schema?.user_version ?? 0) < DATABASE_SCHEMA_VERSION) {
@@ -399,6 +414,33 @@ const makeAvailable = Effect.gen(function* () {
         catch: databaseError("save-preferences"),
       }).pipe(Effect.asVoid),
     ),
+    loadThreadLastVisitedAtByKey: Effect.tryPromise({
+      try: () =>
+        database.getAllAsync<{ readonly threadKey: string; readonly visitedAt: string }>(
+          "SELECT thread_key AS threadKey, visited_at AS visitedAt FROM thread_visits",
+        ),
+      catch: databaseError("load-thread-visits"),
+    }).pipe(
+      Effect.map((rows) =>
+        Object.fromEntries(rows.map((row) => [row.threadKey, row.visitedAt] as const)),
+      ),
+    ),
+    saveThreadLastVisitedAt: Effect.fn("MobileDatabase.saveThreadLastVisitedAt")(
+      (threadKey, visitedAt) =>
+        Effect.tryPromise({
+          try: () =>
+            database.runAsync(
+              `INSERT INTO thread_visits (thread_key, visited_at)
+               VALUES (?, ?)
+               ON CONFLICT (thread_key) DO UPDATE SET
+                 visited_at = excluded.visited_at
+               WHERE excluded.visited_at > thread_visits.visited_at`,
+              threadKey,
+              visitedAt,
+            ),
+          catch: databaseError("save-thread-visit"),
+        }).pipe(Effect.asVoid),
+    ),
   });
 });
 
@@ -414,6 +456,8 @@ function makeUnavailable(error: MobileDatabaseError): MobileDatabase["Service"] 
     inspectCaches: fail,
     loadPreferencesJson: fail,
     savePreferencesJson: () => fail,
+    loadThreadLastVisitedAtByKey: fail,
+    saveThreadLastVisitedAt: () => fail,
   });
 }
 
