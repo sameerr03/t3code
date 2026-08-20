@@ -104,6 +104,11 @@ class FakeCodexRuntime implements CodexSessionRuntimeShape {
       }),
   );
 
+  public readonly forkThreadImpl = vi.fn(
+    (_input: { readonly lastTurnId: TurnId; readonly cwd: string }) =>
+      Promise.resolve({ threadId: "provider-thread-fork" }),
+  );
+
   public readonly respondToRequestImpl = vi.fn(
     (_requestId: ApprovalRequestId, _decision: ProviderApprovalDecision): Promise<void> =>
       Promise.resolve(undefined),
@@ -140,6 +145,10 @@ class FakeCodexRuntime implements CodexSessionRuntimeShape {
 
   rollbackThread(numTurns: number) {
     return Effect.promise(() => this.rollbackThreadImpl(numTurns));
+  }
+
+  forkThread(input: { readonly lastTurnId: TurnId; readonly cwd: string }) {
+    return Effect.promise(() => this.forkThreadImpl(input));
   }
 
   respondToRequest(requestId: ApprovalRequestId, decision: ProviderApprovalDecision) {
@@ -310,6 +319,34 @@ const sessionErrorLayer = it.layer(
 );
 
 sessionErrorLayer("CodexAdapterLive session errors", (it) => {
+  it.effect("forks native Codex conversation state at a completed turn", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      const threadId = asThreadId("thread-fork-source");
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+      const runtime = sessionRuntimeFactory.lastRuntime;
+      NodeAssert.ok(runtime);
+
+      const result = yield* adapter.forkThread!({
+        threadId,
+        lastTurnId: asTurnId("turn-fork-point"),
+        cwd: "/tmp/fork-target",
+      });
+
+      NodeAssert.equal(adapter.capabilities.threadFork, "native");
+      NodeAssert.deepStrictEqual(runtime.forkThreadImpl.mock.calls, [
+        [{ lastTurnId: asTurnId("turn-fork-point"), cwd: "/tmp/fork-target" }],
+      ]);
+      NodeAssert.deepStrictEqual(result.resumeCursor, {
+        threadId: "provider-thread-fork",
+      });
+    }),
+  );
+
   it.effect("maps missing adapter sessions to ProviderAdapterSessionNotFoundError", () =>
     Effect.gen(function* () {
       const adapter = yield* CodexAdapter;

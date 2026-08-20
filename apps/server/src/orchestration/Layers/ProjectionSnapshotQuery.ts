@@ -63,6 +63,7 @@ import {
   type ProjectionFullThreadDiffContext,
   type ProjectionSnapshotCounts,
   type ProjectionThreadCheckpointContext,
+  type ProjectionThreadForkBoundary,
   type ProjectionSnapshotQueryShape,
 } from "../Services/ProjectionSnapshotQuery.ts";
 
@@ -138,6 +139,15 @@ const ProjectIdLookupInput = Schema.Struct({
 });
 const ThreadIdLookupInput = Schema.Struct({
   threadId: ThreadId,
+});
+const ThreadMessageLookupInput = Schema.Struct({
+  threadId: ThreadId,
+  messageId: MessageId,
+});
+const ProjectionThreadForkBoundaryRowSchema = Schema.Struct({
+  checkpointTurnCount: Schema.NullOr(NonNegativeInt),
+  checkpointRef: Schema.NullOr(CheckpointRef),
+  turnId: Schema.NullOr(TurnId),
 });
 // Windowed reads order turns by the stable keyset (anchor, turn key), where
 // anchor is requested_at and turn key is
@@ -1112,6 +1122,71 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
       `,
   });
 
+  const getThreadForkBoundaryRow = SqlSchema.findOneOption({
+    Request: ThreadMessageLookupInput,
+    Result: ProjectionThreadForkBoundaryRowSchema,
+    execute: ({ threadId, messageId }) =>
+      sql`
+        WITH selected_turn AS (
+          SELECT
+            1 AS present,
+            checkpoint_turn_count
+          FROM projection_turns
+          WHERE thread_id = ${threadId}
+            AND pending_message_id = ${messageId}
+          ORDER BY row_id ASC
+          LIMIT 1
+        ),
+        selected_message AS (
+          SELECT rowid AS message_row_id
+          FROM projection_thread_messages
+          WHERE thread_id = ${threadId}
+            AND message_id = ${messageId}
+            AND role = 'user'
+          LIMIT 1
+        ),
+        prior_turn AS (
+          SELECT
+            1 AS present,
+            prior.checkpoint_turn_count
+          FROM projection_turns AS prior
+          INNER JOIN projection_thread_messages AS prior_message
+            ON prior_message.thread_id = prior.thread_id
+            AND prior_message.message_id = prior.pending_message_id
+          CROSS JOIN selected_message
+          WHERE prior.thread_id = ${threadId}
+            AND prior_message.rowid < selected_message.message_row_id
+          ORDER BY prior_message.rowid DESC
+          LIMIT 1
+        ),
+        boundary AS (
+          SELECT
+            CASE
+              WHEN selected_turn.present = 1
+                THEN CASE
+                  WHEN selected_turn.checkpoint_turn_count IS NOT NULL
+                    THEN MAX(selected_turn.checkpoint_turn_count - 1, 0)
+                  ELSE NULL
+                END
+              WHEN prior_turn.present = 1 THEN prior_turn.checkpoint_turn_count
+              ELSE 0
+            END AS checkpoint_turn_count
+          FROM selected_message
+          LEFT JOIN selected_turn ON TRUE
+          LEFT JOIN prior_turn ON TRUE
+        )
+        SELECT
+          boundary.checkpoint_turn_count AS "checkpointTurnCount",
+          checkpoint.checkpoint_ref AS "checkpointRef",
+          checkpoint.turn_id AS "turnId"
+        FROM boundary
+        LEFT JOIN projection_turns AS checkpoint
+          ON checkpoint.thread_id = ${threadId}
+          AND checkpoint.checkpoint_turn_count = boundary.checkpoint_turn_count
+          AND checkpoint.checkpoint_status = 'ready'
+      `,
+  });
+
   // Resolves a page of recent turns for a windowed thread detail read. Walks
   // back from the exclusive (beforeAnchorAt, beforeTurnKey) keyset boundary
   // (sentinels "~"/"" mean unbounded, i.e. the first page) until it has seen
@@ -1253,9 +1328,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
       `,
   });
 
-  // Blocking request payloads must remain available even if they predate the
-  // recent activity window. Each CTE returns at most one unresolved row per
-  // request, so the merge below stays bounded by actionable work.
+  // Blocking request payloads and durable thread lineage must remain available
+  // even if they predate the recent activity window. Each branch stays bounded.
   const listPinnedThreadActivityRowsByThread = SqlSchema.findAll({
     Request: ThreadIdLookupInput,
     Result: ProjectionThreadActivityDbRowSchema,
@@ -1324,6 +1398,16 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           FROM user_input_lifecycle
           WHERE request_order = 1
             AND kind = 'user-input.requested'
+          UNION ALL
+          SELECT activity_id
+          FROM (
+            SELECT activity_id
+            FROM projection_thread_activities
+            WHERE thread_id = ${threadId}
+              AND kind = 'thread.forked'
+            ORDER BY created_at ASC, activity_id ASC
+            LIMIT 1
+          )
         )
         SELECT
           activity.activity_id AS "activityId",
@@ -2390,6 +2474,28 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
       });
     });
 
+  const getThreadForkBoundaryBeforeMessage: ProjectionSnapshotQueryShape["getThreadForkBoundaryBeforeMessage"] =
+    (threadId, messageId) =>
+      getThreadForkBoundaryRow({ threadId, messageId }).pipe(
+        Effect.mapError(
+          toPersistenceSqlOrDecodeError(
+            "ProjectionSnapshotQuery.getThreadForkBoundaryBeforeMessage:query",
+            "ProjectionSnapshotQuery.getThreadForkBoundaryBeforeMessage:decodeRow",
+          ),
+        ),
+        Effect.map(
+          Option.flatMap((row) =>
+            row.checkpointTurnCount === null
+              ? Option.none()
+              : Option.some<ProjectionThreadForkBoundary>({
+                  checkpointTurnCount: row.checkpointTurnCount,
+                  checkpointRef: row.checkpointRef,
+                  turnId: row.turnId,
+                }),
+          ),
+        ),
+      );
+
   const getFullThreadDiffContext: NonNullable<
     ProjectionSnapshotQueryShape["getFullThreadDiffContext"]
   > = (threadId, toTurnCount) =>
@@ -2823,6 +2929,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
     getProjectShellById,
     getFirstActiveThreadIdByProjectId,
     getThreadCheckpointContext,
+    getThreadForkBoundaryBeforeMessage,
     getFullThreadDiffContext,
     getThreadShellById,
     getThreadDetailById,

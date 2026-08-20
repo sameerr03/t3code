@@ -197,6 +197,17 @@ function makeFakeCodexAdapter(provider: ProviderDriverKind = CODEX_DRIVER) {
       Effect.succeed({ threadId, turns: [] }),
   );
 
+  const forkThread = vi.fn(
+    (input: {
+      readonly threadId: ThreadId;
+      readonly lastTurnId: TurnId;
+      readonly cwd: string;
+    }): Effect.Effect<{ resumeCursor: unknown }, ProviderAdapterError> =>
+      Effect.succeed({
+        resumeCursor: { threadId: `fork-of-${String(input.threadId)}` },
+      }),
+  );
+
   const stopAll = vi.fn(
     (): Effect.Effect<void, ProviderAdapterError> =>
       Effect.sync(() => {
@@ -208,6 +219,7 @@ function makeFakeCodexAdapter(provider: ProviderDriverKind = CODEX_DRIVER) {
     provider,
     capabilities: {
       sessionModelSwitch: "in-session",
+      threadFork: "native",
     },
     startSession,
     sendTurn,
@@ -219,6 +231,7 @@ function makeFakeCodexAdapter(provider: ProviderDriverKind = CODEX_DRIVER) {
     hasSession,
     readThread,
     rollbackThread,
+    forkThread,
     stopAll,
     get streamEvents() {
       return Stream.fromPubSub(runtimeEventPubSub);
@@ -254,6 +267,7 @@ function makeFakeCodexAdapter(provider: ProviderDriverKind = CODEX_DRIVER) {
     hasSession,
     readThread,
     rollbackThread,
+    forkThread,
     stopAll,
   };
 }
@@ -938,6 +952,81 @@ routing.layer("ProviderServiceLive routing", (it) => {
         assert.equal(startPayload.threadId, session.threadId);
       }
       assert.equal(routing.codex.sendTurn.mock.calls.length, 1);
+    }),
+  );
+
+  it.effect("binds a native conversation fork to the target thread", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService.ProviderService;
+      const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
+      const sourceThreadId = asThreadId("thread-fork-source");
+      const targetThreadId = asThreadId("thread-fork-target");
+      yield* provider.startSession(sourceThreadId, {
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: codexInstanceId,
+        threadId: sourceThreadId,
+        cwd: "/tmp/source",
+        runtimeMode: "full-access",
+      });
+
+      routing.codex.forkThread.mockClear();
+      yield* provider.forkConversation({
+        sourceThreadId,
+        targetThreadId,
+        lastTurnId: asTurnId("turn-fork-point"),
+        cwd: "/tmp/target",
+        runtimeMode: "full-access",
+      });
+
+      assert.deepEqual(routing.codex.forkThread.mock.calls, [
+        [
+          {
+            threadId: sourceThreadId,
+            lastTurnId: asTurnId("turn-fork-point"),
+            cwd: "/tmp/target",
+          },
+        ],
+      ]);
+      const binding = Option.getOrUndefined(yield* directory.getBinding(targetThreadId));
+      assert.equal(binding?.provider, "codex");
+      assert.equal(binding?.providerInstanceId, codexInstanceId);
+      assert.equal(binding?.status, "stopped");
+      assert.deepEqual(binding?.resumeCursor, {
+        threadId: `fork-of-${String(sourceThreadId)}`,
+      });
+      assert.deepEqual(binding?.runtimePayload, {
+        cwd: "/tmp/target",
+        activeTurnId: null,
+        lastRuntimeEvent: "provider.forkConversation",
+        lastRuntimeEventAt: "1970-01-01T00:00:00.000Z",
+      });
+
+      yield* provider.stopSession({ threadId: sourceThreadId });
+      routing.codex.startSession.mockClear();
+      routing.codex.stopSession.mockClear();
+      routing.codex.forkThread.mockClear();
+      const recoveredTargetThreadId = asThreadId("thread-fork-target-from-stopped");
+
+      yield* provider.forkConversation({
+        sourceThreadId,
+        targetThreadId: recoveredTargetThreadId,
+        lastTurnId: asTurnId("turn-fork-point"),
+        cwd: "/tmp/recovered-target",
+        runtimeMode: "full-access",
+      });
+
+      assert.equal(routing.codex.startSession.mock.calls.length, 1);
+      assert.deepEqual(routing.codex.stopSession.mock.calls, [[sourceThreadId]]);
+      assert.equal(routing.codex.forkThread.mock.calls.length, 1);
+      const sourceBinding = Option.getOrUndefined(yield* directory.getBinding(sourceThreadId));
+      const recoveredTargetBinding = Option.getOrUndefined(
+        yield* directory.getBinding(recoveredTargetThreadId),
+      );
+      assert.equal(sourceBinding?.status, "stopped");
+      assert.equal(recoveredTargetBinding?.status, "stopped");
+      assert.deepEqual(recoveredTargetBinding?.resumeCursor, {
+        threadId: `fork-of-${String(sourceThreadId)}`,
+      });
     }),
   );
 

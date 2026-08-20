@@ -12,7 +12,10 @@
 import {
   ModelSelection,
   NonNegativeInt,
+  RuntimeMode,
   ThreadId,
+  TrimmedNonEmptyString,
+  TurnId,
   ProviderInterruptTurnInput,
   ProviderRespondToRequestInput,
   ProviderRespondToUserInputInput,
@@ -27,6 +30,7 @@ import {
 import { causeErrorTag } from "@t3tools/shared/observability";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
@@ -84,6 +88,14 @@ type ProviderServiceMethod<Name extends keyof ProviderService.ProviderService["S
 const ProviderRollbackConversationInput = Schema.Struct({
   threadId: ThreadId,
   numTurns: NonNegativeInt,
+});
+
+const ProviderForkConversationInput = Schema.Struct({
+  sourceThreadId: ThreadId,
+  targetThreadId: ThreadId,
+  lastTurnId: TurnId,
+  cwd: TrimmedNonEmptyString,
+  runtimeMode: RuntimeMode,
 });
 
 function toValidationError(
@@ -516,6 +528,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         threadId: input.threadId,
         runtimeMode: binding.runtimeMode,
         isActive: true,
+        recovered: false,
       } as const;
     }
 
@@ -526,6 +539,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         threadId: input.threadId,
         runtimeMode: binding.runtimeMode,
         isActive: false,
+        recovered: false,
       } as const;
     }
 
@@ -539,6 +553,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       threadId: input.threadId,
       runtimeMode: recovered.session.runtimeMode,
       isActive: true,
+      recovered: true,
     } as const;
   });
 
@@ -1117,6 +1132,56 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     );
   });
 
+  const forkConversation: ProviderServiceMethod<"forkConversation"> = Effect.fn("forkConversation")(
+    function* (rawInput) {
+      const input = yield* decodeInputOrValidationError({
+        operation: "ProviderService.forkConversation",
+        schema: ProviderForkConversationInput,
+        payload: rawInput,
+      });
+      const routed = yield* resolveRoutableSession({
+        threadId: input.sourceThreadId,
+        operation: "ProviderService.forkConversation",
+        allowRecovery: true,
+      });
+      const forkThread = routed.adapter.forkThread;
+      if (routed.adapter.capabilities.threadFork !== "native" || !forkThread) {
+        return yield* toValidationError(
+          "ProviderService.forkConversation",
+          `Provider '${routed.adapter.provider}' does not support conversation forks.`,
+        );
+      }
+      const forkExit = yield* Effect.exit(
+        forkThread({
+          threadId: input.sourceThreadId,
+          cwd: input.cwd,
+          lastTurnId: input.lastTurnId,
+        }),
+      );
+      if (routed.recovered) {
+        yield* stopSession({ threadId: input.sourceThreadId });
+      }
+      if (Exit.isFailure(forkExit)) {
+        return yield* Effect.failCause(forkExit.cause);
+      }
+      const fork = forkExit.value;
+      yield* directory.upsert({
+        threadId: input.targetThreadId,
+        provider: routed.adapter.provider,
+        providerInstanceId: routed.instanceId,
+        status: "stopped",
+        resumeCursor: fork.resumeCursor,
+        runtimeMode: input.runtimeMode,
+        runtimePayload: {
+          cwd: input.cwd,
+          activeTurnId: null,
+          lastRuntimeEvent: "provider.forkConversation",
+          lastRuntimeEventAt: yield* nowIso,
+        },
+      });
+    },
+  );
+
   const runStopAll = Effect.fn("runStopAll")(function* () {
     const threadIds = yield* directory.listThreadIds();
     const currentAdapters = yield* getAdapterEntries;
@@ -1188,6 +1253,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     getCapabilities,
     getInstanceInfo,
     rollbackConversation,
+    forkConversation,
     // Each access creates a fresh PubSub subscription so that multiple
     // consumers (ProviderRuntimeIngestion, CheckpointReactor, etc.) each
     // independently receive all runtime events.

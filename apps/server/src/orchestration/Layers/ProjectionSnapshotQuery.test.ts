@@ -39,6 +39,147 @@ const projectionSnapshotLayer = it.layer(
 );
 
 projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
+  it.effect("resolves user fork boundaries from completed provider turns", () =>
+    Effect.gen(function* () {
+      const snapshotQuery = yield* ProjectionSnapshotQuery;
+      const sql = yield* SqlClient.SqlClient;
+
+      yield* sql`DELETE FROM projection_turns`;
+      yield* sql`DELETE FROM projection_thread_messages`;
+      yield* sql`
+        INSERT INTO projection_thread_messages (
+          message_id, thread_id, turn_id, role, text, is_streaming, created_at, updated_at
+        )
+        VALUES
+          ('message-user-failed-first', 'thread-fork-boundary', NULL, 'user', 'failed first', 0,
+            '2026-08-20T00:00:00.000Z', '2026-08-20T00:00:00.000Z'),
+          ('message-user-1', 'thread-fork-boundary', NULL, 'user', 'first success', 0,
+            '2026-08-20T00:00:01.000Z', '2026-08-20T00:00:01.000Z'),
+          ('message-user-failed', 'thread-fork-boundary', NULL, 'user', 'failed middle', 0,
+            '2026-08-20T00:00:02.000Z', '2026-08-20T00:00:02.000Z'),
+          ('message-user-queued', 'thread-fork-boundary', NULL, 'user', 'queued follow-up', 0,
+            '2026-08-20T00:00:03.000Z', '2026-08-20T00:00:03.000Z'),
+          ('message-user-failed-late', 'thread-fork-boundary', NULL, 'user', 'failed late', 0,
+            '2026-08-20T00:00:04.000Z', '2026-08-20T00:00:04.000Z'),
+          ('message-user-error', 'thread-fork-boundary', NULL, 'user', 'checkpoint fails', 0,
+            '2026-08-20T00:00:05.000Z', '2026-08-20T00:00:05.000Z'),
+          ('message-user-after-error', 'thread-fork-boundary', NULL, 'user', 'failed after error', 0,
+            '2026-08-20T00:00:06.000Z', '2026-08-20T00:00:06.000Z'),
+          ('message-user-running', 'thread-fork-boundary', NULL, 'user', 'still running', 0,
+            '2026-08-20T00:00:07.000Z', '2026-08-20T00:00:07.000Z'),
+          ('message-user-after-running', 'thread-fork-boundary', NULL, 'user',
+            'failed after running', 0, '2026-08-20T00:00:08.000Z',
+            '2026-08-20T00:00:08.000Z')
+      `;
+      yield* sql`
+        INSERT INTO projection_turns (
+          thread_id, turn_id, pending_message_id, state, requested_at, started_at, completed_at,
+          checkpoint_turn_count, checkpoint_ref, checkpoint_status, checkpoint_files_json
+        )
+        VALUES
+          ('thread-fork-boundary', 'turn-success-1', 'message-user-1', 'completed',
+            '2026-08-20T00:00:01.000Z', '2026-08-20T00:00:01.000Z',
+            '2026-08-20T00:00:02.000Z', 1, 'checkpoint-1', 'ready', '[]'),
+          ('thread-fork-boundary', 'turn-success-2', 'message-user-queued', 'completed',
+            '2026-08-20T00:00:03.000Z', '2026-08-20T00:00:03.000Z',
+            '2026-08-20T00:00:04.000Z', 2, 'checkpoint-2', 'ready', '[]'),
+          ('thread-fork-boundary', 'turn-checkpoint-error', 'message-user-error', 'error',
+            '2026-08-20T00:00:05.000Z', '2026-08-20T00:00:05.000Z',
+            '2026-08-20T00:00:06.000Z', 3, 'checkpoint-3', 'error', '[]'),
+          ('thread-fork-boundary', 'turn-running', 'message-user-running', 'running',
+            '2026-08-20T00:00:07.000Z', '2026-08-20T00:00:07.000Z', NULL,
+            NULL, NULL, NULL, '[]')
+      `;
+
+      const failedFirst = yield* snapshotQuery.getThreadForkBoundaryBeforeMessage(
+        ThreadId.make("thread-fork-boundary"),
+        MessageId.make("message-user-failed-first"),
+      );
+      const first = yield* snapshotQuery.getThreadForkBoundaryBeforeMessage(
+        ThreadId.make("thread-fork-boundary"),
+        MessageId.make("message-user-1"),
+      );
+      const failedBetweenCompletedTurns = yield* snapshotQuery.getThreadForkBoundaryBeforeMessage(
+        ThreadId.make("thread-fork-boundary"),
+        MessageId.make("message-user-failed"),
+      );
+      const queuedAfterFailedStart = yield* snapshotQuery.getThreadForkBoundaryBeforeMessage(
+        ThreadId.make("thread-fork-boundary"),
+        MessageId.make("message-user-queued"),
+      );
+      const failedAfterTwoCompletedTurns = yield* snapshotQuery.getThreadForkBoundaryBeforeMessage(
+        ThreadId.make("thread-fork-boundary"),
+        MessageId.make("message-user-failed-late"),
+      );
+      const failedAfterCheckpointError = yield* snapshotQuery.getThreadForkBoundaryBeforeMessage(
+        ThreadId.make("thread-fork-boundary"),
+        MessageId.make("message-user-after-error"),
+      );
+      const failedAfterRunningTurn = yield* snapshotQuery.getThreadForkBoundaryBeforeMessage(
+        ThreadId.make("thread-fork-boundary"),
+        MessageId.make("message-user-after-running"),
+      );
+      const unknown = yield* snapshotQuery.getThreadForkBoundaryBeforeMessage(
+        ThreadId.make("thread-fork-boundary"),
+        MessageId.make("message-unknown"),
+      );
+
+      assert.equal(failedFirst._tag, "Some");
+      if (failedFirst._tag === "Some") {
+        assert.deepEqual(failedFirst.value, {
+          checkpointTurnCount: 0,
+          checkpointRef: null,
+          turnId: null,
+        });
+      }
+      assert.equal(first._tag, "Some");
+      if (first._tag === "Some") {
+        assert.deepEqual(first.value, {
+          checkpointTurnCount: 0,
+          checkpointRef: null,
+          turnId: null,
+        });
+      }
+      assert.equal(queuedAfterFailedStart._tag, "Some");
+      if (queuedAfterFailedStart._tag === "Some") {
+        assert.deepEqual(queuedAfterFailedStart.value, {
+          checkpointTurnCount: 1,
+          checkpointRef: CheckpointRef.make("checkpoint-1"),
+          turnId: TurnId.make("turn-success-1"),
+        });
+      }
+      assert.equal(failedBetweenCompletedTurns._tag, "Some");
+      if (failedBetweenCompletedTurns._tag === "Some") {
+        assert.deepEqual(failedBetweenCompletedTurns.value, {
+          checkpointTurnCount: 1,
+          checkpointRef: CheckpointRef.make("checkpoint-1"),
+          turnId: TurnId.make("turn-success-1"),
+        });
+      }
+      assert.equal(failedAfterTwoCompletedTurns._tag, "Some");
+      if (failedAfterTwoCompletedTurns._tag === "Some") {
+        assert.deepEqual(failedAfterTwoCompletedTurns.value, {
+          checkpointTurnCount: 2,
+          checkpointRef: CheckpointRef.make("checkpoint-2"),
+          turnId: TurnId.make("turn-success-2"),
+        });
+      }
+      assert.equal(failedAfterCheckpointError._tag, "Some");
+      if (failedAfterCheckpointError._tag === "Some") {
+        assert.deepEqual(failedAfterCheckpointError.value, {
+          checkpointTurnCount: 3,
+          checkpointRef: null,
+          turnId: null,
+        });
+      }
+      assert.equal(failedAfterRunningTurn._tag, "None");
+      assert.equal(unknown._tag, "None");
+
+      yield* sql`DELETE FROM projection_turns WHERE thread_id = 'thread-fork-boundary'`;
+      yield* sql`DELETE FROM projection_thread_messages WHERE thread_id = 'thread-fork-boundary'`;
+    }),
+  );
+
   it.effect("hydrates read model from projection tables and computes snapshot sequence", () =>
     Effect.gen(function* () {
       const snapshotQuery = yield* ProjectionSnapshotQuery;
@@ -2334,6 +2475,11 @@ projectionSnapshotLayer("ProjectionSnapshotQuery windowed thread detail", (it) =
         )
         VALUES
           (
+            'fork-lineage-old', 'thread-w', NULL, 'info', 'thread.forked',
+            'Forked from parent', '{"parentThreadId":"parent"}', NULL,
+            '2026-03-01T00:00:00.000Z'
+          ),
+          (
             'approval-old', 'thread-w', NULL, 'approval', 'approval.requested',
             'Approve old command', '{"requestId":"approval-1"}', NULL,
             '2026-03-01T00:00:01.000Z'
@@ -2382,12 +2528,15 @@ projectionSnapshotLayer("ProjectionSnapshotQuery windowed thread detail", (it) =
       const detailWithPinnedRequests = yield* snapshotQuery.getThreadDetailById(threadW);
       assert.equal(detailWithPinnedRequests._tag, "Some");
       if (detailWithPinnedRequests._tag === "Some") {
-        const ids = detailWithPinnedRequests.value.activities.map((activity) => activity.id);
-        assert.equal(detailWithPinnedRequests.value.activities.length, 503);
-        assert.equal(ids.includes(asEventId("approval-old")), true);
-        assert.equal(ids.includes(asEventId("user-input-old")), true);
-        assert.equal(ids.includes(asEventId("user-input-closed")), false);
-        assert.equal(ids.includes(asEventId("user-input-tied-z-request")), true);
+        const ids = new Set(
+          detailWithPinnedRequests.value.activities.map((activity) => activity.id),
+        );
+        assert.equal(ids.has(asEventId("fork-lineage-old")), true);
+        assert.equal(detailWithPinnedRequests.value.activities.length, 504);
+        assert.equal(ids.has(asEventId("approval-old")), true);
+        assert.equal(ids.has(asEventId("user-input-old")), true);
+        assert.equal(ids.has(asEventId("user-input-closed")), false);
+        assert.equal(ids.has(asEventId("user-input-tied-z-request")), true);
       }
 
       const windowWithPinnedRequests = yield* snapshotQuery.getThreadDetailSnapshot(threadW, {
@@ -2395,12 +2544,15 @@ projectionSnapshotLayer("ProjectionSnapshotQuery windowed thread detail", (it) =
       });
       assert.equal(windowWithPinnedRequests._tag, "Some");
       if (windowWithPinnedRequests._tag === "Some") {
-        const ids = windowWithPinnedRequests.value.thread.activities.map((activity) => activity.id);
-        assert.equal(windowWithPinnedRequests.value.thread.activities.length, 503);
-        assert.equal(ids.includes(asEventId("approval-old")), true);
-        assert.equal(ids.includes(asEventId("user-input-old")), true);
-        assert.equal(ids.includes(asEventId("user-input-closed")), false);
-        assert.equal(ids.includes(asEventId("user-input-tied-z-request")), true);
+        const ids = new Set(
+          windowWithPinnedRequests.value.thread.activities.map((activity) => activity.id),
+        );
+        assert.equal(ids.has(asEventId("fork-lineage-old")), true);
+        assert.equal(windowWithPinnedRequests.value.thread.activities.length, 504);
+        assert.equal(ids.has(asEventId("approval-old")), true);
+        assert.equal(ids.has(asEventId("user-input-old")), true);
+        assert.equal(ids.has(asEventId("user-input-closed")), false);
+        assert.equal(ids.has(asEventId("user-input-tied-z-request")), true);
       }
     }),
   );
