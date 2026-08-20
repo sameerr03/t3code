@@ -52,6 +52,7 @@ import {
   ChevronRightIcon,
   CircleAlertIcon,
   EyeIcon,
+  GitForkIcon,
   GlobeIcon,
   HammerIcon,
   MessageCircleIcon,
@@ -139,6 +140,10 @@ interface TimelineRowSharedState {
   skills: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">>;
   activeThreadEnvironmentId: EnvironmentId;
   onRevertUserMessage: (messageId: MessageId) => void;
+  canEditUserMessage: (messageId: MessageId) => boolean;
+  canForkAssistantMessage: (messageId: MessageId) => boolean;
+  onEditUserMessage: (messageId: MessageId) => void;
+  onForkAssistantMessage: (messageId: MessageId) => void;
   onImageExpand: (preview: ExpandedImagePreview) => void;
   onOpenTurnDiff: (turnId: TurnId, filePath?: string) => void;
   onToggleTurnFold: (turnId: TurnId) => void;
@@ -150,6 +155,7 @@ interface TimelineRowSharedState {
 interface TimelineRowActivityState {
   isWorking: boolean;
   isRevertingCheckpoint: boolean;
+  isForkingThread: boolean;
   activeTurnInProgress: boolean;
   latestTurnId: TurnId | null;
   /** Current plan step label for the working row, when the turn has a plan. */
@@ -187,6 +193,28 @@ function TimelineLoadEarlierHeader({
     </div>
   );
 }
+
+function TimelineForkLineageCard({
+  label,
+  onOpenParent,
+}: {
+  label: string;
+  onOpenParent: () => void;
+}) {
+  return (
+    <div className="mx-auto w-full max-w-3xl pb-2" data-thread-fork-lineage>
+      <button
+        type="button"
+        onClick={onOpenParent}
+        className="flex w-full items-center gap-2 rounded-lg border border-border/70 bg-muted/25 px-3 py-2 text-left text-xs text-muted-foreground transition-colors hover:bg-muted/45 hover:text-foreground"
+      >
+        <GitForkIcon className="size-3.5 shrink-0" />
+        <span className="min-w-0 flex-1 truncate">{label}</span>
+        <ChevronRightIcon className="size-3.5 shrink-0" />
+      </button>
+    </div>
+  );
+}
 const TIMELINE_LIST_FOOTER = <div className="h-3 sm:h-4" />;
 const EMPTY_TIMELINE_SKILLS: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">> = [];
 const TIMELINE_MAINTAIN_SCROLL_AT_END = {
@@ -218,6 +246,15 @@ interface MessagesTimelineProps {
   onOpenTurnDiff: (turnId: TurnId, filePath?: string) => void;
   revertTurnCountByUserMessageId: Map<MessageId, number>;
   onRevertUserMessage: (messageId: MessageId) => void;
+  canEditUserMessage: (messageId: MessageId) => boolean;
+  canForkAssistantMessage: (messageId: MessageId) => boolean;
+  onEditUserMessage: (messageId: MessageId) => void;
+  onForkAssistantMessage: (messageId: MessageId) => void;
+  isForkingThread: boolean;
+  forkLineage: {
+    readonly label: string;
+    readonly onOpenParent: () => void;
+  } | null;
   isRevertingCheckpoint: boolean;
   onImageExpand: (preview: ExpandedImagePreview) => void;
   activeThreadEnvironmentId: EnvironmentId;
@@ -264,6 +301,12 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   onOpenTurnDiff,
   revertTurnCountByUserMessageId,
   onRevertUserMessage,
+  canEditUserMessage,
+  canForkAssistantMessage,
+  onEditUserMessage,
+  onForkAssistantMessage,
+  isForkingThread,
+  forkLineage,
   isRevertingCheckpoint,
   onImageExpand,
   activeThreadEnvironmentId,
@@ -501,6 +544,16 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     };
   }, [timelineViewportElement, rows.length]);
 
+  const forkActionRefs = useRef({ onEditUserMessage, onForkAssistantMessage });
+  forkActionRefs.current = { onEditUserMessage, onForkAssistantMessage };
+  const handleEditUserMessage = useCallback(
+    (messageId: MessageId) => forkActionRefs.current.onEditUserMessage(messageId),
+    [],
+  );
+  const handleForkAssistantMessage = useCallback(
+    (messageId: MessageId) => forkActionRefs.current.onForkAssistantMessage(messageId),
+    [],
+  );
   const sharedState = useMemo<TimelineRowSharedState>(
     () => ({
       timestampFormat,
@@ -512,6 +565,10 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       skills,
       activeThreadEnvironmentId,
       onRevertUserMessage,
+      canEditUserMessage,
+      canForkAssistantMessage,
+      onEditUserMessage: handleEditUserMessage,
+      onForkAssistantMessage: handleForkAssistantMessage,
       onImageExpand,
       onOpenTurnDiff,
       onToggleTurnFold,
@@ -528,6 +585,10 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       skills,
       activeThreadEnvironmentId,
       onRevertUserMessage,
+      canEditUserMessage,
+      canForkAssistantMessage,
+      handleEditUserMessage,
+      handleForkAssistantMessage,
       onImageExpand,
       onOpenTurnDiff,
       onToggleTurnFold,
@@ -540,11 +601,19 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     () => ({
       isWorking,
       isRevertingCheckpoint,
+      isForkingThread,
       activeTurnInProgress,
       latestTurnId: latestTurn?.turnId ?? null,
       workingStepLabel,
     }),
-    [activeTurnInProgress, isRevertingCheckpoint, isWorking, latestTurn?.turnId, workingStepLabel],
+    [
+      activeTurnInProgress,
+      isForkingThread,
+      isRevertingCheckpoint,
+      isWorking,
+      latestTurn?.turnId,
+      workingStepLabel,
+    ],
   );
 
   // Stable renderItem — no closure deps. Row components read shared state
@@ -558,13 +627,42 @@ export const MessagesTimeline = memo(function MessagesTimeline({
     [],
   );
 
+  const listHeader = forkLineage ? (
+    <>
+      {topFadeEnabled ? TIMELINE_LIST_FADE_HEADER : TIMELINE_LIST_HEADER}
+      <TimelineForkLineageCard {...forkLineage} />
+      {loadEarlier ? (
+        <TimelineLoadEarlierHeader
+          loading={loadEarlier.loading}
+          onLoadEarlier={loadEarlier.onLoadEarlier}
+          fade={false}
+        />
+      ) : null}
+    </>
+  ) : loadEarlier !== null ? (
+    <TimelineLoadEarlierHeader
+      loading={loadEarlier.loading}
+      onLoadEarlier={loadEarlier.onLoadEarlier}
+      fade={topFadeEnabled}
+    />
+  ) : topFadeEnabled ? (
+    TIMELINE_LIST_FADE_HEADER
+  ) : (
+    TIMELINE_LIST_HEADER
+  );
+
   if (rows.length === 0 && !isWorking) {
-    if (hideEmptyPlaceholder) {
+    if (hideEmptyPlaceholder && !forkLineage) {
       return null;
     }
     return (
-      <div className="flex h-full items-center justify-center">
-        <p className="text-placeholder text-sm">Send a message to start the conversation.</p>
+      <div className="flex h-full flex-col px-3 sm:px-5">
+        {forkLineage ? listHeader : null}
+        {hideEmptyPlaceholder ? null : (
+          <div className="flex min-h-0 flex-1 items-center justify-center">
+            <p className="text-placeholder text-sm">Send a message to start the conversation.</p>
+          </div>
+        )}
       </div>
     );
   }
@@ -594,19 +692,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
               "scrollbar-gutter-both h-full min-h-0 overflow-x-hidden overscroll-y-contain px-3 [overflow-anchor:none] sm:px-5",
               topFadeEnabled && "topbar-scroll-fade",
             )}
-            ListHeaderComponent={
-              loadEarlier !== null ? (
-                <TimelineLoadEarlierHeader
-                  loading={loadEarlier.loading}
-                  onLoadEarlier={loadEarlier.onLoadEarlier}
-                  fade={topFadeEnabled}
-                />
-              ) : topFadeEnabled ? (
-                TIMELINE_LIST_FADE_HEADER
-              ) : (
-                TIMELINE_LIST_HEADER
-              )
-            }
+            ListHeaderComponent={listHeader}
             ListFooterComponent={TIMELINE_LIST_FOOTER}
           />
           <TimelineMinimap
@@ -974,6 +1060,7 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
   const previewImages = userImages.filter((image) => image.name.startsWith("preview-annotation-"));
   const regularImages = userImages.filter((image) => !image.name.startsWith("preview-annotation-"));
   const canRevertAgentWork = typeof row.revertTurnCount === "number";
+  const canEditMessage = ctx.canEditUserMessage(row.message.id);
 
   return (
     <div className="group flex flex-col items-end gap-1">
@@ -1046,6 +1133,7 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
             </TooltipPopup>
           </Tooltip>
           <div className="flex items-center gap-0.5">
+            {canEditMessage && <EditUserMessageButton messageId={row.message.id} />}
             {canRevertAgentWork && <RevertUserMessageButton messageId={row.message.id} />}
             {displayedUserMessage.copyText && (
               <MessageCopyButton text={displayedUserMessage.copyText} variant="ghost" />
@@ -1054,6 +1142,33 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
         </div>
       </div>
     </div>
+  );
+}
+
+function EditUserMessageButton({ messageId }: { messageId: MessageId }) {
+  const ctx = use(TimelineRowCtx);
+  const activity = use(TimelineRowActivityCtx);
+
+  return (
+    <Tooltip>
+      <TooltipTrigger
+        render={
+          <Button
+            type="button"
+            size="xs"
+            variant="ghost"
+            disabled={
+              activity.isForkingThread || activity.isRevertingCheckpoint || activity.isWorking
+            }
+            onClick={() => ctx.onEditUserMessage(messageId)}
+            aria-label="Edit message in a new fork"
+          />
+        }
+      >
+        <SquarePenIcon className="size-3" />
+      </TooltipTrigger>
+      <TooltipPopup side="top">Edit and fork</TooltipPopup>
+    </Tooltip>
   );
 }
 
@@ -1069,7 +1184,9 @@ function RevertUserMessageButton({ messageId }: { messageId: MessageId }) {
             type="button"
             size="xs"
             variant="ghost"
-            disabled={activity.isRevertingCheckpoint || activity.isWorking}
+            disabled={
+              activity.isForkingThread || activity.isRevertingCheckpoint || activity.isWorking
+            }
             onClick={() => ctx.onRevertUserMessage(messageId)}
             aria-label="Revert to this message"
           />
@@ -1105,6 +1222,7 @@ function TurnFoldTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "turn-
 function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" }> }) {
   const ctx = use(TimelineRowCtx);
   const messageText = row.message.text || (row.message.streaming ? "" : "(empty response)");
+  const canForkMessage = ctx.canForkAssistantMessage(row.message.id);
 
   return (
     <>
@@ -1125,6 +1243,7 @@ function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "mess
         />
         {row.showAssistantMeta ? (
           <div className="mt-1.5 flex items-center gap-2 text-xs tabular-nums opacity-0 transition-opacity duration-200 focus-within:opacity-100 group-hover/assistant:opacity-100">
+            {canForkMessage && <ForkAssistantMessageButton messageId={row.message.id} />}
             <AssistantCopyButton row={row} />
             {!row.message.streaming && (
               <Tooltip>
@@ -1142,6 +1261,33 @@ function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "mess
         ) : null}
       </div>
     </>
+  );
+}
+
+function ForkAssistantMessageButton({ messageId }: { messageId: MessageId }) {
+  const ctx = use(TimelineRowCtx);
+  const activity = use(TimelineRowActivityCtx);
+
+  return (
+    <Tooltip>
+      <TooltipTrigger
+        render={
+          <Button
+            type="button"
+            size="xs"
+            variant="ghost"
+            disabled={
+              activity.isForkingThread || activity.isRevertingCheckpoint || activity.isWorking
+            }
+            onClick={() => ctx.onForkAssistantMessage(messageId)}
+            aria-label="Fork from this response"
+          />
+        }
+      >
+        <GitForkIcon className="size-3" />
+      </TooltipTrigger>
+      <TooltipPopup side="top">Fork from here</TooltipPopup>
+    </Tooltip>
   );
 }
 

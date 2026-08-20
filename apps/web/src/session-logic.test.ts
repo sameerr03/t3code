@@ -722,6 +722,19 @@ describe("workEntryIndicatesToolFailure", () => {
 });
 
 describe("deriveWorkLogEntries", () => {
+  it("keeps fork lineage out of the work log", () => {
+    const entries = deriveWorkLogEntries([
+      makeActivity({
+        kind: "thread.forked",
+        summary: "Forked from Parent thread",
+        tone: "info",
+        payload: { parentThreadId: "thread-parent" },
+      }),
+    ]);
+
+    expect(entries).toEqual([]);
+  });
+
   it("omits tool started entries and keeps completed entries", () => {
     const activities: OrchestrationThreadActivity[] = [
       makeActivity({
