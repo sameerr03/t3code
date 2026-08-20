@@ -1,5 +1,7 @@
 import {
+  ChatImageAttachment,
   EnvironmentId,
+  EventId,
   MessageId,
   ProjectId,
   ProviderInstanceId,
@@ -24,8 +26,10 @@ import {
   hasEnvironmentReconnectWarningGraceElapsed,
   hasServerAcknowledgedLocalDispatch,
   isBranchMismatchDismissedForSession,
+  isForkEditableUserMessage,
   reconcileMountedTerminalThreadIds,
   reconcileRetainedMountedThreadIds,
+  resolveThreadForkLineage,
   resolveThreadMetadataUpdateForNextTurn,
   resolveSendEnvMode,
   scheduleEnvironmentReconnectWarning,
@@ -38,6 +42,74 @@ const environmentId = EnvironmentId.make("environment-local");
 const projectId = ProjectId.make("project-1");
 const threadId = ThreadId.make("thread-1");
 const now = "2026-03-29T00:00:00.000Z";
+
+describe("thread fork lineage", () => {
+  it("offers edit only for plain-text user messages", () => {
+    const message = {
+      id: MessageId.make("message-editable"),
+      role: "user" as const,
+      text: "Rewrite this prompt",
+      turnId: null,
+      streaming: false,
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    expect(isForkEditableUserMessage(message)).toBe(true);
+    expect(
+      isForkEditableUserMessage({
+        ...message,
+        text: "Rewrite this\n\n<terminal_context>\n- shell:\n  output\n</terminal_context>",
+      }),
+    ).toBe(false);
+    expect(
+      isForkEditableUserMessage({
+        ...message,
+        attachments: [
+          ChatImageAttachment.make({
+            type: "image",
+            id: "image-1",
+            name: "reference.png",
+            mimeType: "image/png",
+            sizeBytes: 100,
+          }),
+        ],
+      }),
+    ).toBe(false);
+  });
+
+  it("reads the durable parent link and ignores malformed payloads", () => {
+    expect(
+      resolveThreadForkLineage([
+        {
+          id: EventId.make("fork-activity"),
+          tone: "info",
+          kind: "thread.forked",
+          summary: "Forked from Parent thread",
+          payload: { parentThreadId: "thread-parent", cut: "through" },
+          turnId: null,
+          createdAt: now,
+        },
+      ]),
+    ).toEqual({
+      label: "Forked from Parent thread",
+      parentThreadId: ThreadId.make("thread-parent"),
+    });
+    expect(
+      resolveThreadForkLineage([
+        {
+          id: EventId.make("malformed-fork-activity"),
+          tone: "info",
+          kind: "thread.forked",
+          summary: "Forked",
+          payload: {},
+          turnId: null,
+          createdAt: now,
+        },
+      ]),
+    ).toBeNull();
+  });
+});
 
 describe("environment reconnect warning grace", () => {
   afterEach(() => vi.useRealTimers());

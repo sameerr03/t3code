@@ -314,6 +314,7 @@ import {
   scheduleEnvironmentReconnectWarning,
   hasServerAcknowledgedLocalDispatch,
   isBranchMismatchDismissedForSession,
+  isForkEditableUserMessage,
   shouldShowBranchMismatchBanner,
   getStartedThreadModelChangeBlockReason,
   LAST_INVOKED_SCRIPT_BY_PROJECT_KEY,
@@ -324,6 +325,7 @@ import {
   deriveLockedProvider,
   readFileAsDataUrl,
   reconcileMountedTerminalThreadIds,
+  resolveThreadForkLineage,
   resolveThreadMetadataUpdateForNextTurn,
   resolveSendEnvMode,
   revokeBlobPreviewUrl,
@@ -338,6 +340,7 @@ import { useComposerHandleContext } from "../composerHandleContext";
 import { sanitizeThreadErrorMessage } from "~/rpc/transportError";
 import { RightPanelSheet } from "./RightPanelSheet";
 import { previewEnvironment } from "../state/preview";
+import { orchestrationEnvironment } from "../state/orchestration";
 import { useAtomCommand } from "../state/use-atom-command";
 import { Button } from "./ui/button";
 import {
@@ -1251,6 +1254,9 @@ function ChatViewContent(props: ChatViewProps) {
   const revertThreadCheckpoint = useAtomCommand(threadEnvironment.revertCheckpoint, {
     reportFailure: false,
   });
+  const forkThread = useAtomCommand(orchestrationEnvironment.forkThread, {
+    reportFailure: false,
+  });
   const openPreview = useAtomCommand(previewEnvironment.open, { reportFailure: false });
   const closePreview = useAtomCommand(previewEnvironment.close, "preview close");
   const { environments } = useEnvironments();
@@ -1364,6 +1370,7 @@ function ChatViewContent(props: ChatViewProps) {
   >({});
   const [isConnecting, _setIsConnecting] = useState(false);
   const [isRevertingCheckpoint, setIsRevertingCheckpoint] = useState(false);
+  const [isForkingThread, setIsForkingThread] = useState(false);
   const [maximizedRightPanelThreadKey, setMaximizedRightPanelThreadKey] = useState<string | null>(
     null,
   );
@@ -2683,6 +2690,33 @@ function ChatViewContent(props: ChatViewProps) {
     const defaultInstanceId = defaultInstanceIdForDriver(selectedProvider);
     return providerStatuses.find((status) => status.instanceId === defaultInstanceId) ?? null;
   }, [activeProviderInstanceId, providerStatuses, selectedProvider]);
+  const canForkCodexThread =
+    routeKind === "server" && activeProviderStatus?.driver === ProviderDriverKind.make("codex");
+  const forkEligibilityRef = useRef({ activeThread, canForkCodexThread });
+  forkEligibilityRef.current = { activeThread, canForkCodexThread };
+  const canEditUserMessage = useCallback((messageId: MessageId) => {
+    const { activeThread: thread, canForkCodexThread: canFork } = forkEligibilityRef.current;
+    if (!canFork) {
+      return false;
+    }
+    const message = thread?.messages.find((candidate) => candidate.id === messageId);
+    return message ? isForkEditableUserMessage(message) : false;
+  }, []);
+  const canForkAssistantMessage = useCallback((messageId: MessageId) => {
+    const { activeThread: thread, canForkCodexThread: canFork } = forkEligibilityRef.current;
+    return (
+      canFork &&
+      (thread?.checkpoints.some(
+        (checkpoint) =>
+          checkpoint.status === "ready" && checkpoint.assistantMessageId === messageId,
+      ) ??
+        false)
+    );
+  }, []);
+  const threadForkLineage = useMemo(
+    () => resolveThreadForkLineage(activeThread?.activities ?? []),
+    [activeThread?.activities],
+  );
   const providerStatusBannerKey = getProviderStatusBannerKey(activeProviderStatus);
   const [dismissedProviderStatusBannerKey, setDismissedProviderStatusBannerKey] = useState<
     string | null
@@ -2835,6 +2869,112 @@ function ChatViewContent(props: ChatViewProps) {
       composerRef.current?.addTerminalContext(selection);
     },
     [composerRef],
+  );
+  const forkFromMessage = useCallback(
+    async (messageId: MessageId, cut: "before" | "through") => {
+      if (!activeThread || !canForkCodexThread || isForkingThread) {
+        return;
+      }
+      if (activeEnvironmentUnavailable && activeEnvironmentUnavailableLabel) {
+        setThreadError(
+          activeThread.id,
+          `Reconnect ${activeEnvironmentUnavailableLabel} before forking this thread.`,
+        );
+        return;
+      }
+      if (phase === "running" || isSendBusy || isConnecting || isRevertingCheckpoint) {
+        setThreadError(activeThread.id, "Finish the current action before forking this thread.");
+        return;
+      }
+
+      const sourceMessage = activeThread.messages.find((message) => message.id === messageId);
+      if (!sourceMessage) {
+        return;
+      }
+
+      setIsForkingThread(true);
+      setThreadError(activeThread.id, null);
+      try {
+        const result = await forkThread({
+          environmentId: activeThread.environmentId,
+          input: {
+            sourceThreadId: activeThread.id,
+            sourceMessageId: messageId,
+            cut,
+            title: truncate(`${activeThread.title} (${cut === "before" ? "edit" : "fork"})`),
+          },
+        });
+        if (result._tag === "Failure") {
+          if (!isAtomCommandInterrupted(result)) {
+            setThreadError(
+              activeThread.id,
+              chatActionErrorMessage(squashAtomCommandFailure(result)),
+            );
+          }
+          return;
+        }
+
+        const childThreadRef = scopeThreadRef(activeThread.environmentId, result.value.threadId);
+        if (cut === "before") {
+          setComposerDraftPrompt(childThreadRef, sourceMessage.text);
+        }
+        await navigate({
+          to: "/$environmentId/$threadId",
+          params: {
+            environmentId: childThreadRef.environmentId,
+            threadId: childThreadRef.threadId,
+          },
+        });
+        if (cut === "before") {
+          scheduleComposerFocus();
+        }
+      } catch (error) {
+        setThreadError(activeThread.id, chatActionErrorMessage(error));
+      } finally {
+        setIsForkingThread(false);
+      }
+    },
+    [
+      activeEnvironmentUnavailable,
+      activeEnvironmentUnavailableLabel,
+      activeThread,
+      canForkCodexThread,
+      forkThread,
+      isConnecting,
+      isForkingThread,
+      isRevertingCheckpoint,
+      isSendBusy,
+      navigate,
+      phase,
+      scheduleComposerFocus,
+      setComposerDraftPrompt,
+      setThreadError,
+    ],
+  );
+  const onEditUserMessage = useCallback(
+    (messageId: MessageId) => void forkFromMessage(messageId, "before"),
+    [forkFromMessage],
+  );
+  const onForkAssistantMessage = useCallback(
+    (messageId: MessageId) => void forkFromMessage(messageId, "through"),
+    [forkFromMessage],
+  );
+  const onOpenForkParent = useCallback(() => {
+    if (!activeThread || !threadForkLineage) {
+      return;
+    }
+    void navigate({
+      to: "/$environmentId/$threadId",
+      params: {
+        environmentId: activeThread.environmentId,
+        threadId: threadForkLineage.parentThreadId,
+      },
+    });
+  }, [activeThread, navigate, threadForkLineage]);
+  const timelineForkLineage = useMemo(
+    () =>
+      threadForkLineage ? { label: threadForkLineage.label, onOpenParent: onOpenForkParent } : null,
+    [onOpenForkParent, threadForkLineage],
   );
   const setTerminalOpen = useCallback(
     (open: boolean) => {
@@ -5012,6 +5152,7 @@ function ChatViewContent(props: ChatViewProps) {
       !activeThread ||
       isSendBusy ||
       isConnecting ||
+      isForkingThread ||
       threadDetailLoading ||
       sendInFlightRef.current
     ) {
@@ -6396,6 +6537,12 @@ function ChatViewContent(props: ChatViewProps) {
                 onOpenTurnDiff={onOpenTurnDiff}
                 revertTurnCountByUserMessageId={revertTurnCountByUserMessageId}
                 onRevertUserMessage={onRevertUserMessage}
+                canEditUserMessage={canEditUserMessage}
+                canForkAssistantMessage={canForkAssistantMessage}
+                onEditUserMessage={onEditUserMessage}
+                onForkAssistantMessage={onForkAssistantMessage}
+                isForkingThread={isForkingThread}
+                forkLineage={timelineForkLineage}
                 isRevertingCheckpoint={isRevertingCheckpoint}
                 onImageExpand={onExpandTimelineImage}
                 markdownCwd={gitCwd ?? undefined}
@@ -6507,7 +6654,13 @@ function ChatViewContent(props: ChatViewProps) {
                             phase={phase}
                             isConnecting={isConnecting}
                             isSendBusy={isSendBusy}
-                            sendDisabledReason={threadDetailLoading ? "Messages loading" : null}
+                            sendDisabledReason={
+                              threadDetailLoading
+                                ? "Messages loading"
+                                : isForkingThread
+                                  ? "Creating fork"
+                                  : null
+                            }
                             isPreparingWorktree={isPreparingWorktree}
                             environmentUnavailable={activeEnvironmentUnavailableState}
                             activePendingApproval={activePendingApproval}

@@ -186,6 +186,12 @@ function buildProps() {
     onOpenTurnDiff: () => {},
     revertTurnCountByUserMessageId: new Map(),
     onRevertUserMessage: () => {},
+    canEditUserMessage: () => false,
+    canForkAssistantMessage: () => false,
+    onEditUserMessage: () => {},
+    onForkAssistantMessage: () => {},
+    isForkingThread: false,
+    forkLineage: null,
     isRevertingCheckpoint: false,
     onImageExpand: () => {},
     activeThreadEnvironmentId: ACTIVE_THREAD_ENVIRONMENT_ID,
@@ -237,6 +243,47 @@ function buildAssistantTimelineEntry(text: string) {
 }
 
 describe("MessagesTimeline", () => {
+  it("renders edit and fork actions only for reproducible message boundaries", () => {
+    const userEntry = buildUserTimelineEntry("Change this prompt");
+    const assistantEntry = buildAssistantTimelineEntry("Fork after this response");
+    const userMarkup = renderToStaticMarkup(
+      <MessagesTimeline
+        {...buildProps()}
+        timelineEntries={[userEntry]}
+        canEditUserMessage={(messageId) => messageId === userEntry.message.id}
+      />,
+    );
+    const assistantMarkup = renderToStaticMarkup(
+      <MessagesTimeline
+        {...buildProps()}
+        timelineEntries={[assistantEntry]}
+        canForkAssistantMessage={(messageId) => messageId === assistantEntry.message.id}
+      />,
+    );
+    const unavailableMarkup = renderToStaticMarkup(
+      <MessagesTimeline {...buildProps()} timelineEntries={[userEntry, assistantEntry]} />,
+    );
+
+    expect(userMarkup).toContain('aria-label="Edit message in a new fork"');
+    expect(assistantMarkup).toContain('aria-label="Fork from this response"');
+    expect(unavailableMarkup).not.toContain("Edit message in a new fork");
+    expect(unavailableMarkup).not.toContain("Fork from this response");
+  });
+
+  it("keeps fork lineage visible on an empty child thread", () => {
+    const markup = renderToStaticMarkup(
+      <MessagesTimeline
+        {...buildProps()}
+        timelineEntries={[]}
+        forkLineage={{ label: "Forked from Parent thread", onOpenParent: () => {} }}
+      />,
+    );
+
+    expect(markup).toContain("data-thread-fork-lineage");
+    expect(markup).toContain("Forked from Parent thread");
+    expect(markup).toContain("Send a message to start the conversation.");
+  });
+
   it("uses the larger leading inset only when the top fade is enabled", () => {
     const timelineEntries = [buildUserTimelineEntry("Hello")];
 

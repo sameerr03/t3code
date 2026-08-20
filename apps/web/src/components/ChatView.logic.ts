@@ -1,13 +1,14 @@
 import {
   type EnvironmentId,
   isProviderDriverKind,
+  type OrchestrationThreadActivity,
   ProjectId,
   type ModelSelection,
   type ProviderDriverKind,
   type ServerProvider,
   type ScopedProjectRef,
   type ScopedThreadRef,
-  type ThreadId,
+  ThreadId,
   type TurnId,
 } from "@t3tools/contracts";
 import { type ChatMessage, type SessionPhase, type Thread, type ThreadShell } from "../types";
@@ -28,6 +29,42 @@ export const MAX_HIDDEN_MOUNTED_PREVIEW_THREADS = 3;
 export const ENVIRONMENT_RECONNECT_WARNING_GRACE_MS = 2_000;
 
 export const LastInvokedScriptByProjectSchema = Schema.Record(ProjectId, Schema.String);
+
+export interface ThreadForkLineage {
+  readonly label: string;
+  readonly parentThreadId: ThreadId;
+}
+
+const SERIALIZED_MESSAGE_CONTEXT_PATTERN =
+  /<(?:terminal_context|element_context|preview_annotation|review_comment)\b/i;
+
+export function isForkEditableUserMessage(message: ChatMessage): boolean {
+  return (
+    message.role === "user" &&
+    !message.streaming &&
+    (message.attachments?.length ?? 0) === 0 &&
+    !SERIALIZED_MESSAGE_CONTEXT_PATTERN.test(message.text)
+  );
+}
+
+export function resolveThreadForkLineage(
+  activities: ReadonlyArray<OrchestrationThreadActivity>,
+): ThreadForkLineage | null {
+  const activity = activities.find((candidate) => candidate.kind === "thread.forked");
+  const payload =
+    activity?.payload && typeof activity.payload === "object" ? activity.payload : null;
+  const parentThreadId =
+    payload && "parentThreadId" in payload && typeof payload.parentThreadId === "string"
+      ? payload.parentThreadId.trim()
+      : "";
+  if (!activity || parentThreadId.length === 0) {
+    return null;
+  }
+  return {
+    label: activity.summary,
+    parentThreadId: ThreadId.make(parentThreadId),
+  };
+}
 
 export function scheduleEnvironmentReconnectWarning(showWarning: () => void): () => void {
   const timeoutId = globalThis.setTimeout(showWarning, ENVIRONMENT_RECONNECT_WARNING_GRACE_MS);
