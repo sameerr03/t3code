@@ -12,6 +12,20 @@ If reordering is unavailable for one environment, update the T3 Code server runn
 environment. Older servers can still pin and unpin threads, but do not understand synced ordering;
 their pinned threads keep the default newest-first order below the ones you have arranged.
 
+## Archiving worktree threads
+
+Archiving a thread removes its worktree when no other active thread uses that worktree. T3 Code
+leaves the branch and its commits intact. If the worktree contains modified or untracked files,
+archiving fails and keeps both the thread and worktree active.
+
+The worktree must still be checked out on the branch recorded for the thread. T3 Code refuses to
+remove detached worktrees or worktrees that have been switched to a different branch, because it
+could not recreate them safely.
+
+Choose **Unarchive** in Settings > Archive to recreate a removed worktree at its previous path and
+open the thread again. Threads archived by an older version can reuse a worktree that is still on
+disk.
+
 ## Environment artwork
 
 Dev and Nightly environments can identify themselves with artwork at the top of the sidebar and in

@@ -8,6 +8,7 @@ import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
+import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 import {
   DEFAULT_AUTOMATIC_GIT_FETCH_INTERVAL,
@@ -23,6 +24,7 @@ import {
   type GitManagerServiceError,
   OrchestrationDispatchCommandError,
   type OrchestrationEvent,
+  type OrchestrationShellSnapshot,
   type OrchestrationShellStreamEvent,
   type OrchestrationShellStreamItem,
   type OrchestrationThreadStreamItem,
@@ -55,9 +57,11 @@ import {
   type TerminalError,
   type TerminalEvent,
   type TerminalMetadataStreamEvent,
+  type VcsRef,
   WS_METHODS,
   WsRpcGroup,
 } from "@t3tools/contracts";
+import { normalizeProjectPathForComparison } from "@t3tools/shared/path";
 import { resolveServerBackgroundActivitySettings } from "@t3tools/shared/backgroundActivitySettings";
 import { HttpRouter, HttpServerRequest, HttpServerRespondable } from "effect/unstable/http";
 import { RpcSerialization, RpcServer } from "effect/unstable/rpc";
@@ -79,6 +83,7 @@ import {
   observeRpcStreamEffect as instrumentRpcStreamEffect,
 } from "./observability/RpcInstrumentation.ts";
 import * as ProviderRegistry from "./provider/Services/ProviderRegistry.ts";
+import * as ProviderService from "./provider/Services/ProviderService.ts";
 import * as ProviderMaintenanceRunner from "./provider/providerMaintenanceRunner.ts";
 import * as ServerSelfUpdate from "./cloud/selfUpdate.ts";
 import * as ServerLifecycleEvents from "./serverLifecycleEvents.ts";
@@ -308,6 +313,7 @@ const SHELL_RESUME_MAX_GAP = 1_000;
 // hundreds of thousands of events behind have OOM-killed servers on large
 // databases. Past this gap the client is reset with a fresh thread snapshot.
 const THREAD_RESUME_MAX_GAP = 1_000;
+const threadWorktreeLifecycleSemaphore = Semaphore.makeUnsafe(1);
 
 function toAuthAccessStreamEvent(
   change: PairingGrantStore.BootstrapCredentialChange | SessionStore.SessionCredentialChange,
@@ -364,6 +370,8 @@ const makeWsRpcLayer = (
       const externalLauncher = yield* ExternalLauncher.ExternalLauncher;
       const remoteOpenTargets = yield* RemoteOpenTargets.RemoteOpenTargets;
       const gitWorkflow = yield* GitWorkflowService.GitWorkflowService;
+      const vcsDriverRegistry = yield* VcsDriverRegistry.VcsDriverRegistry;
+      const vcsDriver = yield* vcsDriverRegistry.get("git").pipe(Effect.orDie);
       const review = yield* ReviewService.ReviewService;
       const vcsProvisioning = yield* VcsProvisioningService.VcsProvisioningService;
       const vcsStatusBroadcaster = yield* VcsStatusBroadcaster.VcsStatusBroadcaster;
@@ -371,6 +379,7 @@ const makeWsRpcLayer = (
       const previewManager = yield* PreviewManager.PreviewManager;
       const portDiscovery = yield* PortScanner.PortDiscovery;
       const providerRegistry = yield* ProviderRegistry.ProviderRegistry;
+      const providerService = yield* ProviderService.ProviderService;
       const providerMaintenanceRunner = yield* ProviderMaintenanceRunner.ProviderMaintenanceRunner;
       const serverSelfUpdate = yield* ServerSelfUpdate.ServerSelfUpdate;
       const config = yield* ServerConfig.ServerConfig;
@@ -1039,91 +1048,473 @@ const makeWsRpcLayer = (
           .refreshStatus(cwd)
           .pipe(Effect.ignoreCause({ log: true }), Effect.forkDetach, Effect.asVoid);
 
+      const workspaceIsUsedByAnotherThread = (
+        snapshot: OrchestrationShellSnapshot,
+        threadId: ThreadId,
+        workspacePath: string,
+      ) => {
+        const targetPath = normalizeProjectPathForComparison(workspacePath);
+        return snapshot.threads.some((candidate) => {
+          if (candidate.id === threadId) return false;
+          const project = snapshot.projects.find(({ id }) => id === candidate.projectId);
+          if (!project) return false;
+          return (
+            normalizeProjectPathForComparison(candidate.worktreePath ?? project.workspaceRoot) ===
+            targetPath
+          );
+        });
+      };
+
+      const resolveThreadWorktreeTransition = Effect.fn("WsRpc.resolveThreadWorktreeTransition")(
+        function* (
+          command: Extract<OrchestrationCommand, { type: "thread.archive" | "thread.unarchive" }>,
+        ) {
+          const targetSnapshot = yield* command.type === "thread.archive"
+            ? projectionSnapshotQuery.getShellSnapshot()
+            : projectionSnapshotQuery.getArchivedShellSnapshot();
+          const thread = targetSnapshot.threads.find(
+            (candidate) => candidate.id === command.threadId,
+          );
+          if (!thread?.worktreePath) {
+            return null;
+          }
+
+          const project = targetSnapshot.projects.find(
+            (candidate) => candidate.id === thread.projectId,
+          );
+          if (!project) {
+            return yield* new OrchestrationDispatchCommandError({
+              message: `Cannot ${command.type === "thread.archive" ? "archive" : "restore"} this thread because its project is unavailable.`,
+            });
+          }
+
+          if (command.type === "thread.archive") {
+            const worktreeIsShared = workspaceIsUsedByAnotherThread(
+              targetSnapshot,
+              command.threadId,
+              thread.worktreePath,
+            );
+            return {
+              type: command.type,
+              cwd: project.workspaceRoot,
+              path: thread.worktreePath,
+              branch: thread.branch,
+              removeWorktree: !worktreeIsShared,
+              shouldStopSession: thread.session !== null && thread.session.status !== "stopped",
+            } as const;
+          }
+
+          return {
+            type: command.type,
+            cwd: project.workspaceRoot,
+            path: thread.worktreePath,
+            branch: thread.branch,
+            shouldStopSession: thread.session !== null && thread.session.status !== "stopped",
+          } as const;
+        },
+      );
+
+      type ResolvedThreadWorktreeTransition = NonNullable<
+        Effect.Success<ReturnType<typeof resolveThreadWorktreeTransition>>
+      >;
+      type ArchiveWorktreeTransition = Extract<
+        ResolvedThreadWorktreeTransition,
+        { readonly type: "thread.archive" }
+      >;
+
+      const validateArchiveWorktree = Effect.fn("WsRpc.validateArchiveWorktree")(function* (
+        transition: ArchiveWorktreeTransition,
+      ) {
+        yield* gitWorkflow.invalidateLocalStatus(transition.path);
+        const status = yield* gitWorkflow.localStatus({ cwd: transition.path }).pipe(
+          Effect.mapError(
+            (error) =>
+              new OrchestrationDispatchCommandError({
+                message: `Cannot inspect this thread's worktree before archiving. ${error.message}`,
+                cause: error,
+              }),
+          ),
+        );
+        if (!status.isRepo) {
+          return yield* new OrchestrationDispatchCommandError({
+            message: "Cannot archive this thread because its worktree is unavailable.",
+          });
+        }
+        if (!transition.branch || !status.refName) {
+          return yield* new OrchestrationDispatchCommandError({
+            message:
+              "Cannot archive this thread because its worktree branch is unknown. Check out a branch before archiving.",
+          });
+        }
+        if (status.refName !== transition.branch) {
+          return yield* new OrchestrationDispatchCommandError({
+            message: `Cannot archive this thread because its worktree is checked out on '${status.refName}', not '${transition.branch}'.`,
+          });
+        }
+        if (status.hasWorkingTreeChanges) {
+          return yield* new OrchestrationDispatchCommandError({
+            message:
+              "Cannot archive this thread because its worktree has modified or untracked files. Commit or remove them before archiving.",
+          });
+        }
+      });
+
+      const prepareArchiveWorktree = Effect.fn("WsRpc.prepareArchiveWorktree")(function* (
+        command: Extract<OrchestrationCommand, { type: "thread.archive" }>,
+      ) {
+        const transition = yield* resolveThreadWorktreeTransition(command);
+        if (!transition || transition.type !== "thread.archive") {
+          return null;
+        }
+
+        yield* validateArchiveWorktree(transition);
+
+        return transition;
+      });
+
+      const revalidateArchiveRemoval = Effect.fn("WsRpc.revalidateArchiveRemoval")(function* (
+        command: Extract<OrchestrationCommand, { type: "thread.archive" }>,
+        transition: NonNullable<Effect.Success<ReturnType<typeof prepareArchiveWorktree>>>,
+      ) {
+        const [activeSnapshot, archivedSnapshot] = yield* Effect.all([
+          projectionSnapshotQuery.getShellSnapshot(),
+          projectionSnapshotQuery.getArchivedShellSnapshot(),
+        ]);
+        const archivedThread = archivedSnapshot.threads.find(
+          (candidate) => candidate.id === command.threadId,
+        );
+        if (
+          !archivedThread ||
+          archivedThread.worktreePath !== transition.path ||
+          archivedThread.branch !== transition.branch
+        ) {
+          return yield* new OrchestrationDispatchCommandError({
+            message:
+              "Cannot finish archiving this thread because its worktree metadata changed. The thread has been restored.",
+          });
+        }
+        if (workspaceIsUsedByAnotherThread(activeSnapshot, command.threadId, transition.path)) {
+          return yield* new OrchestrationDispatchCommandError({
+            message:
+              "Cannot finish archiving this thread because another active thread now uses its worktree. The thread has been restored.",
+          });
+        }
+
+        yield* validateArchiveWorktree(transition);
+      });
+
+      const prepareUnarchiveWorktree = Effect.fn("WsRpc.prepareUnarchiveWorktree")(function* (
+        command: Extract<OrchestrationCommand, { type: "thread.unarchive" }>,
+      ) {
+        const transition = yield* resolveThreadWorktreeTransition(command);
+        if (!transition || transition.type !== "thread.unarchive") {
+          return null;
+        }
+
+        let cursor: number | undefined;
+        let existingRef: VcsRef | undefined;
+        do {
+          const refs = yield* gitWorkflow
+            .listRefs({
+              cwd: transition.cwd,
+              ...(cursor === undefined ? {} : { cursor }),
+              limit: 100,
+              refKind: "local",
+              refresh: cursor === undefined,
+            })
+            .pipe(
+              Effect.mapError(
+                (error) =>
+                  new OrchestrationDispatchCommandError({
+                    message: `Cannot inspect this thread's archived worktree. ${error.detail}`,
+                    cause: error,
+                  }),
+              ),
+            );
+          existingRef = refs.refs.find((ref) => ref.worktreePath === transition.path);
+          cursor = refs.nextCursor ?? undefined;
+        } while (!existingRef && cursor !== undefined);
+        if (existingRef) {
+          const worktreeExists = yield* vcsDriver
+            .isInsideWorkTree(transition.path)
+            .pipe(Effect.orElseSucceed(() => false));
+          if (worktreeExists) {
+            if (transition.branch && existingRef.name !== transition.branch) {
+              return yield* new OrchestrationDispatchCommandError({
+                message: `Cannot restore this thread because its recorded worktree is checked out on '${existingRef.name}', not '${transition.branch}'.`,
+              });
+            }
+            return {
+              ...transition,
+              branch: transition.branch ?? existingRef.name,
+              discoveredBranch: transition.branch === null,
+              created: false,
+            } as const;
+          }
+
+          yield* vcsDriver
+            .execute({
+              operation: "WsRpc.prepareUnarchiveWorktree.prune",
+              cwd: transition.cwd,
+              args: ["worktree", "prune"],
+              timeoutMs: 5_000,
+              maxOutputBytes: 4_096,
+            })
+            .pipe(
+              Effect.mapError((error) =>
+                toDispatchCommandError(
+                  error,
+                  "Cannot repair this thread's missing worktree registration.",
+                ),
+              ),
+            );
+        }
+        if (!transition.branch) {
+          return yield* new OrchestrationDispatchCommandError({
+            message:
+              "Cannot restore this thread because its worktree is missing and its branch is unknown.",
+          });
+        }
+
+        yield* gitWorkflow
+          .createWorktree({
+            cwd: transition.cwd,
+            refName: transition.branch,
+            path: transition.path,
+          })
+          .pipe(
+            Effect.mapError(
+              (error) =>
+                new OrchestrationDispatchCommandError({
+                  message: `Cannot restore this thread's worktree. ${error.detail}`,
+                  cause: error,
+                }),
+            ),
+          );
+        yield* refreshGitStatus(transition.cwd);
+        return { ...transition, discoveredBranch: false, created: true } as const;
+      });
+
+      const rollbackCreatedWorktree = (
+        transition: NonNullable<Effect.Success<ReturnType<typeof prepareUnarchiveWorktree>>>,
+      ) =>
+        gitWorkflow.removeWorktree({ cwd: transition.cwd, path: transition.path }).pipe(
+          Effect.tap(() => refreshGitStatus(transition.cwd)),
+          Effect.catchCause((cause) =>
+            Effect.logError("failed to roll back restored thread worktree", {
+              cwd: transition.cwd,
+              path: transition.path,
+              cause: Cause.pretty(cause),
+            }),
+          ),
+        );
+
+      const restoreArchivedThread = Effect.fn("WsRpc.restoreArchivedThread")(function* (
+        command: Extract<OrchestrationCommand, { type: "thread.unarchive" }>,
+      ) {
+        const transition = yield* prepareUnarchiveWorktree(command);
+        if (transition?.discoveredBranch) {
+          const branchCommand = {
+            type: "thread.meta.update",
+            commandId: yield* serverCommandId("restore-worktree-branch"),
+            threadId: command.threadId,
+            branch: transition.branch,
+            expectedBranch: null,
+          } satisfies OrchestrationCommand;
+          yield* dispatchNormalizedCommand(branchCommand);
+        }
+        return yield* dispatchNormalizedCommand(command).pipe(
+          Effect.onError(() =>
+            transition?.created ? rollbackCreatedWorktree(transition) : Effect.void,
+          ),
+        );
+      });
+
+      const shouldStopThreadSession = (threadId: ThreadId) =>
+        projectionSnapshotQuery.getThreadShellById(threadId).pipe(
+          Effect.map(
+            Option.match({
+              onNone: () => false,
+              onSome: (thread) => thread.session !== null && thread.session.status !== "stopped",
+            }),
+          ),
+          Effect.catchCause((cause) =>
+            Effect.logWarning("failed to read thread session state before session-stop check", {
+              threadId,
+              cause,
+            }).pipe(Effect.as(false)),
+          ),
+        );
+
+      const dispatchParkingSessionStop = Effect.fn("WsRpc.dispatchParkingSessionStop")(function* (
+        command: Extract<OrchestrationCommand, { type: "thread.archive" | "thread.settle" }>,
+      ) {
+        const parkingKind = command.type === "thread.archive" ? "archive" : "settle";
+        const stopCommand = yield* normalizeDispatchCommand({
+          type: "thread.session.stop",
+          commandId: CommandId.make(`session-stop-for-${parkingKind}:${command.commandId}`),
+          threadId: command.threadId,
+          createdAt: yield* nowIso,
+          // Settled threads can be re-engaged before this stop is decided.
+          // Archived threads cannot accept a new turn.
+          ...(parkingKind === "settle" ? { onlyIfSettled: true } : {}),
+        });
+        yield* dispatchNormalizedCommand(stopCommand);
+      });
+
+      const stopParkingSessionBestEffort = (
+        command: Extract<OrchestrationCommand, { type: "thread.archive" | "thread.settle" }>,
+        shouldStop: boolean,
+      ) =>
+        shouldStop
+          ? dispatchParkingSessionStop(command).pipe(
+              Effect.catchCause((cause) =>
+                Effect.logWarning(
+                  `failed to stop provider session during ${command.type === "thread.archive" ? "archive" : "settle"}`,
+                  { threadId: command.threadId, cause },
+                ),
+              ),
+            )
+          : Effect.void;
+
+      const closeArchivedThreadTerminalsBestEffort = (threadId: ThreadId) =>
+        terminalManager.close({ threadId }).pipe(
+          Effect.catch((error) =>
+            Effect.logWarning("failed to close thread terminals after archive", {
+              threadId,
+              error: error.message,
+            }),
+          ),
+        );
+
+      const compensateFailedArchiveCleanup = Effect.fn("WsRpc.compensateFailedArchiveCleanup")(
+        function* (threadId: ThreadId) {
+          const command = {
+            type: "thread.unarchive",
+            commandId: yield* serverCommandId("archive-worktree-cleanup-rollback"),
+            threadId,
+          } satisfies OrchestrationCommand;
+          yield* restoreArchivedThread(command);
+        },
+      );
+
+      const cleanupArchivedWorktree = Effect.fn("WsRpc.cleanupArchivedWorktree")(function* (
+        command: Extract<OrchestrationCommand, { type: "thread.archive" }>,
+        transition: NonNullable<Effect.Success<ReturnType<typeof prepareArchiveWorktree>>>,
+      ) {
+        if (transition.shouldStopSession) {
+          yield* providerService
+            .stopSession({ threadId: command.threadId })
+            .pipe(
+              Effect.mapError((error) =>
+                toDispatchCommandError(
+                  error,
+                  "Failed to stop the provider session before archive.",
+                ),
+              ),
+            );
+          yield* dispatchParkingSessionStop(command);
+        }
+        yield* terminalManager
+          .close({ threadId: command.threadId })
+          .pipe(
+            Effect.mapError((error) =>
+              toDispatchCommandError(error, "Failed to close thread terminals before archive."),
+            ),
+          );
+        if (transition.removeWorktree) {
+          yield* revalidateArchiveRemoval(command, transition);
+          yield* gitWorkflow.removeWorktree({ cwd: transition.cwd, path: transition.path }).pipe(
+            Effect.mapError(
+              (error) =>
+                new OrchestrationDispatchCommandError({
+                  message: `Cannot archive this thread because its worktree could not be removed. ${error.detail}`,
+                  cause: error,
+                }),
+            ),
+          );
+          yield* refreshGitStatus(transition.cwd);
+        }
+      });
+
+      const dispatchArchiveCommand = Effect.fn("WsRpc.dispatchArchiveCommand")(function* (
+        command: Extract<OrchestrationCommand, { type: "thread.archive" }>,
+      ) {
+        const transition = yield* prepareArchiveWorktree(command);
+        const shouldStopSession = transition
+          ? transition.shouldStopSession
+          : yield* shouldStopThreadSession(command.threadId);
+
+        if (!transition) {
+          const result = yield* dispatchNormalizedCommand(command);
+          yield* stopParkingSessionBestEffort(command, shouldStopSession);
+          yield* closeArchivedThreadTerminalsBestEffort(command.threadId);
+          return result;
+        }
+
+        return yield* Effect.uninterruptible(
+          Effect.gen(function* () {
+            const result = yield* dispatchNormalizedCommand(command);
+            yield* cleanupArchivedWorktree(command, transition).pipe(
+              Effect.catchCause((cause) =>
+                compensateFailedArchiveCleanup(command.threadId).pipe(
+                  Effect.catchCause((compensationCause) =>
+                    Effect.logError("failed to restore thread after archive cleanup failed", {
+                      threadId: command.threadId,
+                      cause: Cause.pretty(compensationCause),
+                    }),
+                  ),
+                  Effect.andThen(Effect.failCause(cause)),
+                ),
+              ),
+            );
+            return result;
+          }),
+        );
+      });
+
+      const dispatchUnarchiveCommand = Effect.fn("WsRpc.dispatchUnarchiveCommand")(function* (
+        command: Extract<OrchestrationCommand, { type: "thread.unarchive" }>,
+      ) {
+        return yield* Effect.uninterruptible(restoreArchivedThread(command));
+      });
+
+      const dispatchClientCommand = Effect.fn("WsRpc.dispatchClientCommand")(function* (
+        command: OrchestrationCommand,
+      ) {
+        switch (command.type) {
+          case "thread.archive":
+            return yield* threadWorktreeLifecycleSemaphore.withPermit(
+              dispatchArchiveCommand(command),
+            );
+          case "thread.unarchive":
+            return yield* threadWorktreeLifecycleSemaphore.withPermit(
+              dispatchUnarchiveCommand(command),
+            );
+          case "thread.create":
+          case "thread.meta.update":
+          case "thread.turn.start":
+            return yield* threadWorktreeLifecycleSemaphore.withPermit(
+              dispatchNormalizedCommand(command),
+            );
+          case "thread.settle": {
+            const shouldStopSession = yield* shouldStopThreadSession(command.threadId);
+            const result = yield* dispatchNormalizedCommand(command);
+            yield* stopParkingSessionBestEffort(command, shouldStopSession);
+            return result;
+          }
+          default:
+            return yield* dispatchNormalizedCommand(command);
+        }
+      });
+
       return WsRpcGroup.of({
         [ORCHESTRATION_WS_METHODS.dispatchCommand]: (command) =>
           observeRpcEffect(
             ORCHESTRATION_WS_METHODS.dispatchCommand,
             Effect.gen(function* () {
               const normalizedCommand = yield* normalizeDispatchCommand(command);
-              // Archive and settle both mean "done with this thread", so a
-              // live provider session must not keep running background work
-              // (PR monitors, dev servers, subagent fleets) after either
-              // lands. The decider rejects settling a starting/running
-              // session, so for settle this only ever stops an idle one; a
-              // stopped session-set does not count as activity, so the stop
-              // cannot un-settle the thread it follows.
-              const parkingCommand =
-                normalizedCommand.type === "thread.archive" ||
-                normalizedCommand.type === "thread.settle"
-                  ? normalizedCommand
-                  : undefined;
-              // Best-effort on purpose: the user's archive/settle must not
-              // fail because this cleanup read blipped, so a failed read
-              // logs and skips the stop instead of propagating.
-              const shouldStopSessionAfterCommand = parkingCommand
-                ? yield* projectionSnapshotQuery.getThreadShellById(parkingCommand.threadId).pipe(
-                    Effect.map(
-                      Option.match({
-                        onNone: () => false,
-                        onSome: (thread) =>
-                          thread.session !== null && thread.session.status !== "stopped",
-                      }),
-                    ),
-                    Effect.catchCause((cause) =>
-                      Effect.logWarning(
-                        "failed to read thread session state before session-stop check",
-                        { threadId: parkingCommand.threadId, cause },
-                      ).pipe(Effect.as(false)),
-                    ),
-                  )
-                : false;
-              const result = yield* dispatchNormalizedCommand(normalizedCommand);
-              if (parkingCommand) {
-                const parkingKind = parkingCommand.type === "thread.archive" ? "archive" : "settle";
-                if (shouldStopSessionAfterCommand) {
-                  yield* Effect.gen(function* () {
-                    const stopCommand = yield* normalizeDispatchCommand({
-                      type: "thread.session.stop",
-                      commandId: CommandId.make(
-                        `session-stop-for-${parkingKind}:${parkingCommand.commandId}`,
-                      ),
-                      threadId: parkingCommand.threadId,
-                      createdAt: yield* nowIso,
-                      // A settled thread can be re-engaged before this stop is
-                      // decided; the decider then drops the stop instead of
-                      // killing the new session. Archive stops stay
-                      // unconditional: turn starts on archived threads are
-                      // rejected, so there is no new session to protect.
-                      ...(parkingKind === "settle" ? { onlyIfSettled: true } : {}),
-                    });
-
-                    yield* dispatchNormalizedCommand(stopCommand);
-                  }).pipe(
-                    Effect.catchCause((cause) =>
-                      Effect.logWarning(`failed to stop provider session during ${parkingKind}`, {
-                        threadId: parkingCommand.threadId,
-                        cause,
-                      }),
-                    ),
-                  );
-                }
-
-                // Terminals are user-opened panes, not thread background
-                // work: archive removes the thread from view so they close
-                // with it, but a settled thread stays reachable and may be
-                // un-settled, so its terminals stay up.
-                if (parkingCommand.type === "thread.archive") {
-                  yield* terminalManager.close({ threadId: parkingCommand.threadId }).pipe(
-                    Effect.catch((error) =>
-                      Effect.logWarning("failed to close thread terminals after archive", {
-                        threadId: parkingCommand.threadId,
-                        error: error.message,
-                      }),
-                    ),
-                  );
-                }
-              }
-              return result;
+              return yield* dispatchClientCommand(normalizedCommand);
             }).pipe(
               Effect.mapError((cause) =>
                 isOrchestrationDispatchCommandError(cause)
