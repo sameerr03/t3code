@@ -2979,7 +2979,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
   )(function* (input) {
     const args = ["worktree", "remove"];
     if (input.force) {
-      args.push("--force");
+      args.push("--force", "--force");
     }
     args.push(input.path);
     yield* executeGit("GitVcsDriver.removeWorktree", input.cwd, args, {

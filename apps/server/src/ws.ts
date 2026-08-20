@@ -1,3 +1,6 @@
+// @effect-diagnostics nodeBuiltinImport:off
+import * as NodePath from "node:path";
+
 import * as Cause from "effect/Cause";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
@@ -52,6 +55,7 @@ import {
   AssetWorkspaceContextResolutionError,
   RpcClientId,
   EnvironmentAuthorizationError,
+  type MessageId,
   ThreadId,
   type TerminalAttachStreamEvent,
   type TerminalError,
@@ -67,6 +71,8 @@ import { HttpRouter, HttpServerRequest, HttpServerRespondable } from "effect/uns
 import { RpcSerialization, RpcServer } from "effect/unstable/rpc";
 
 import * as CheckpointDiffQuery from "./checkpointing/CheckpointDiffQuery.ts";
+import * as CheckpointStore from "./checkpointing/CheckpointStore.ts";
+import { checkpointRefForThreadTurn } from "./checkpointing/Utils.ts";
 import * as ServerConfig from "./config.ts";
 import * as Keybindings from "./keybindings.ts";
 import * as ExternalLauncher from "./process/externalLauncher.ts";
@@ -366,6 +372,7 @@ const makeWsRpcLayer = (
       const projectionSnapshotQuery = yield* ProjectionSnapshotQuery.ProjectionSnapshotQuery;
       const orchestrationEngine = yield* OrchestrationEngine.OrchestrationEngineService;
       const checkpointDiffQuery = yield* CheckpointDiffQuery.CheckpointDiffQuery;
+      const checkpointStore = yield* CheckpointStore.CheckpointStore;
       const keybindings = yield* Keybindings.Keybindings;
       const externalLauncher = yield* ExternalLauncher.ExternalLauncher;
       const remoteOpenTargets = yield* RemoteOpenTargets.RemoteOpenTargets;
@@ -1508,6 +1515,247 @@ const makeWsRpcLayer = (
         }
       });
 
+      const forkThread = Effect.fn("WsRpc.forkThread")(function* (input: {
+        readonly sourceThreadId: ThreadId;
+        readonly sourceMessageId: MessageId;
+        readonly cut: "before" | "through";
+        readonly title: string;
+      }) {
+        const source = Option.getOrUndefined(
+          yield* projectionSnapshotQuery.getThreadDetailById(input.sourceThreadId),
+        );
+        if (!source || source.archivedAt !== null) {
+          return yield* new OrchestrationDispatchCommandError({
+            message: "The source thread is unavailable or archived.",
+          });
+        }
+        const project = Option.getOrUndefined(
+          yield* projectionSnapshotQuery.getProjectShellById(source.projectId),
+        );
+        if (!project) {
+          return yield* new OrchestrationDispatchCommandError({
+            message: "The source thread's project is unavailable.",
+          });
+        }
+        const providerInfo = yield* providerService.getInstanceInfo(
+          source.modelSelection.instanceId,
+        );
+        if (providerInfo.driverKind !== "codex") {
+          return yield* new OrchestrationDispatchCommandError({
+            message: "Conversation forks are currently available for Codex threads only.",
+          });
+        }
+        const sourceMessage = source.messages.find(
+          (message) => message.id === input.sourceMessageId,
+        );
+        if (!sourceMessage || sourceMessage.streaming) {
+          return yield* new OrchestrationDispatchCommandError({
+            message: "The selected message is unavailable or still streaming.",
+          });
+        }
+        if (
+          (input.cut === "before" && sourceMessage.role !== "user") ||
+          (input.cut === "through" && sourceMessage.role !== "assistant")
+        ) {
+          return yield* new OrchestrationDispatchCommandError({
+            message: "User messages fork from before the turn; assistant messages fork through it.",
+          });
+        }
+
+        const precedingCheckpoint =
+          input.cut === "before"
+            ? Option.getOrUndefined(
+                yield* projectionSnapshotQuery.getThreadForkBoundaryBeforeMessage(
+                  source.id,
+                  sourceMessage.id,
+                ),
+              )
+            : undefined;
+        const targetCheckpoint =
+          input.cut === "before"
+            ? precedingCheckpoint?.checkpointTurnCount === 0
+              ? {
+                  checkpointRef: checkpointRefForThreadTurn(source.id, 0),
+                  turnId: undefined,
+                }
+              : precedingCheckpoint?.checkpointRef && precedingCheckpoint.turnId
+                ? {
+                    checkpointRef: precedingCheckpoint.checkpointRef,
+                    turnId: precedingCheckpoint.turnId,
+                  }
+                : undefined
+            : source.checkpoints.find(
+                (checkpoint) => checkpoint.assistantMessageId === sourceMessage.id,
+              );
+        if (
+          !targetCheckpoint ||
+          ("status" in targetCheckpoint && targetCheckpoint.status !== "ready")
+        ) {
+          return yield* new OrchestrationDispatchCommandError({
+            message: "The repository checkpoint for this message is not ready.",
+          });
+        }
+        const sourceCwd = source.worktreePath ?? project.workspaceRoot;
+        const sourceStatus = yield* gitWorkflow.localStatus({ cwd: sourceCwd });
+        const sourceBranch = source.branch ?? sourceStatus.refName;
+        if (!sourceStatus.isRepo || !sourceBranch) {
+          return yield* new OrchestrationDispatchCommandError({
+            message: "Forking requires a Git branch and worktree-capable repository.",
+          });
+        }
+        const hasCheckpoint = yield* checkpointStore.hasCheckpointRef({
+          cwd: sourceCwd,
+          checkpointRef: targetCheckpoint.checkpointRef,
+        });
+        if (!hasCheckpoint) {
+          return yield* new OrchestrationDispatchCommandError({
+            message: "The repository checkpoint for this message no longer exists.",
+          });
+        }
+
+        const childUuid = yield* randomUUID;
+        const childThreadId = ThreadId.make(childUuid);
+        const childBranch = `t3/fork-${childUuid.slice(0, 8)}`;
+        const childWorktreePath = NodePath.join(
+          config.worktreesDir,
+          NodePath.basename(project.workspaceRoot),
+          childBranch.replace(/\//g, "-"),
+        );
+        let childCreated = false;
+        const cleanup = Effect.gen(function* () {
+          if (childCreated) {
+            yield* terminalManager
+              .close({ threadId: childThreadId, deleteHistory: true })
+              .pipe(Effect.ignoreCause({ log: true }));
+          }
+          if (childCreated) {
+            yield* serverCommandId("fork-cleanup-thread-delete").pipe(
+              Effect.flatMap((commandId) =>
+                orchestrationEngine.dispatch({
+                  type: "thread.delete",
+                  commandId,
+                  threadId: childThreadId,
+                }),
+              ),
+              Effect.ignoreCause({ log: true }),
+            );
+          }
+          yield* gitWorkflow
+            .removeWorktree({
+              cwd: project.workspaceRoot,
+              path: childWorktreePath,
+              force: true,
+            })
+            .pipe(Effect.ignoreCause({ log: true }));
+          yield* vcsDriver
+            .execute({
+              operation: "WsRpc.forkThread.deleteBranch",
+              cwd: project.workspaceRoot,
+              args: ["branch", "-D", "--", childBranch],
+            })
+            .pipe(Effect.ignoreCause({ log: true }));
+          yield* refreshGitStatus(project.workspaceRoot);
+        });
+
+        return yield* Effect.gen(function* () {
+          yield* gitWorkflow.createWorktree({
+            cwd: project.workspaceRoot,
+            refName: sourceBranch,
+            newRefName: childBranch,
+            path: childWorktreePath,
+          });
+          const restored = yield* checkpointStore.restoreCheckpoint({
+            cwd: childWorktreePath,
+            checkpointRef: targetCheckpoint.checkpointRef,
+          });
+          if (!restored) {
+            return yield* new OrchestrationDispatchCommandError({
+              message: "The repository checkpoint for this message no longer exists.",
+            });
+          }
+          const createdAt = yield* nowIso;
+          yield* orchestrationEngine.dispatch({
+            type: "thread.create",
+            commandId: yield* serverCommandId("fork-thread-create"),
+            threadId: childThreadId,
+            projectId: source.projectId,
+            title: input.title,
+            modelSelection: source.modelSelection,
+            runtimeMode: source.runtimeMode,
+            interactionMode: source.interactionMode,
+            branch: childBranch,
+            worktreePath: childWorktreePath,
+            createdAt,
+          });
+          childCreated = true;
+          yield* orchestrationEngine.dispatch({
+            type: "thread.activity.append",
+            commandId: yield* serverCommandId("fork-lineage-activity"),
+            threadId: childThreadId,
+            activity: {
+              id: yield* serverEventId,
+              tone: "info",
+              kind: "thread.forked",
+              summary: `Forked from ${source.title}`,
+              payload: {
+                parentThreadId: source.id,
+                parentMessageId: sourceMessage.id,
+                cut: input.cut,
+              },
+              turnId: null,
+              createdAt,
+            },
+            createdAt,
+          });
+          const setup = yield* projectSetupScriptRunner.runForThread({
+            threadId: childThreadId,
+            projectId: source.projectId,
+            projectCwd: project.workspaceRoot,
+            worktreePath: childWorktreePath,
+          });
+          if (setup.status === "started") {
+            yield* appendSetupScriptActivity({
+              threadId: childThreadId,
+              kind: "setup-script.started",
+              summary: "Setup script started",
+              createdAt: yield* nowIso,
+              payload: {
+                scriptId: setup.scriptId,
+                scriptName: setup.scriptName,
+                terminalId: setup.terminalId,
+                worktreePath: childWorktreePath,
+              },
+              tone: "info",
+            });
+          }
+          if (targetCheckpoint.turnId) {
+            yield* providerService.forkConversation({
+              sourceThreadId: source.id,
+              targetThreadId: childThreadId,
+              lastTurnId: targetCheckpoint.turnId,
+              cwd: childWorktreePath,
+              runtimeMode: source.runtimeMode,
+            });
+          }
+          yield* refreshGitStatus(project.workspaceRoot);
+          return {
+            threadId: childThreadId,
+            branch: childBranch,
+            worktreePath: childWorktreePath,
+          };
+        }).pipe(
+          Effect.catchCause((cause) => cleanup.pipe(Effect.andThen(Effect.failCause(cause)))),
+          Effect.mapError((cause) =>
+            isOrchestrationDispatchCommandError(cause)
+              ? cause
+              : new OrchestrationDispatchCommandError({
+                  message: cause instanceof Error ? cause.message : "Failed to fork thread.",
+                  cause,
+                }),
+          ),
+        );
+      });
+
       return WsRpcGroup.of({
         [ORCHESTRATION_WS_METHODS.dispatchCommand]: (command) =>
           observeRpcEffect(
@@ -1521,6 +1769,21 @@ const makeWsRpcLayer = (
                   ? cause
                   : new OrchestrationDispatchCommandError({
                       message: "Failed to dispatch orchestration command",
+                      cause,
+                    }),
+              ),
+            ),
+            { "rpc.aggregate": "orchestration" },
+          ),
+        [ORCHESTRATION_WS_METHODS.forkThread]: (input) =>
+          observeRpcEffect(
+            ORCHESTRATION_WS_METHODS.forkThread,
+            threadWorktreeLifecycleSemaphore.withPermit(forkThread(input)).pipe(
+              Effect.mapError((cause) =>
+                isOrchestrationDispatchCommandError(cause)
+                  ? cause
+                  : new OrchestrationDispatchCommandError({
+                      message: cause instanceof Error ? cause.message : "Failed to fork thread.",
                       cause,
                     }),
               ),

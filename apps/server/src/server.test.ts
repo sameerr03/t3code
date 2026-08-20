@@ -17,6 +17,7 @@ import {
   MessageId,
   ExternalLauncherCommandNotFoundError,
   OrchestrationThreadDetailSnapshot,
+  type OrchestrationThread,
   type OrchestrationThreadStreamItem,
   type OrchestrationThreadShell,
   TerminalNotRunningError,
@@ -29,6 +30,7 @@ import {
   ProviderInstanceId,
   ResolvedKeybindingRule,
   ThreadId,
+  TurnId,
   type VcsRef,
   WS_METHODS,
   WsRpcGroup,
@@ -105,6 +107,8 @@ import * as ServerConfig from "./config.ts";
 import { makeRoutesLayer } from "./server.ts";
 import { isThreadDetailEvent, resolveAvailableEditorsForConfig } from "./ws.ts";
 import * as CheckpointDiffQuery from "./checkpointing/CheckpointDiffQuery.ts";
+import * as CheckpointStore from "./checkpointing/CheckpointStore.ts";
+import { checkpointRefForThreadTurn } from "./checkpointing/Utils.ts";
 import * as GitManager from "./git/GitManager.ts";
 import * as Keybindings from "./keybindings.ts";
 import * as ExternalLauncher from "./process/externalLauncher.ts";
@@ -116,6 +120,7 @@ import { SqlitePersistenceMemory } from "./persistence/Layers/Sqlite.ts";
 import { PersistenceSqlError } from "./persistence/Errors.ts";
 import * as ProviderRegistry from "./provider/Services/ProviderRegistry.ts";
 import * as ProviderService from "./provider/Services/ProviderService.ts";
+import { ProviderValidationError } from "./provider/Errors.ts";
 import { makeManualOnlyProviderMaintenanceCapabilities } from "./provider/providerMaintenance.ts";
 import * as ServerLifecycleEvents from "./serverLifecycleEvents.ts";
 import * as ServerRuntimeStartup from "./serverRuntimeStartup.ts";
@@ -308,6 +313,110 @@ const makeDefaultOrchestrationThreadShell = (
   };
 };
 
+const makeForkSourceThread = (): OrchestrationThread => {
+  const sourceThreadId = ThreadId.make("thread-fork-source");
+  const userMessageId = MessageId.make("message-fork-user");
+  const commentaryMessageId = MessageId.make("message-fork-commentary");
+  const assistantMessageId = MessageId.make("message-fork-assistant");
+  const turnId = TurnId.make("turn-fork-source");
+  const failedUserMessageId = MessageId.make("message-fork-user-failed");
+  const secondUserMessageId = MessageId.make("message-fork-user-2");
+  const secondAssistantMessageId = MessageId.make("message-fork-assistant-2");
+  const secondTurnId = TurnId.make("turn-fork-source-2");
+  const timestamp = "2026-01-01T00:00:00.000Z";
+  return {
+    ...makeDefaultOrchestrationReadModel().threads[0]!,
+    id: sourceThreadId,
+    title: "Source thread",
+    branch: "feature/source",
+    worktreePath: "/tmp/source-worktree",
+    latestTurn: {
+      turnId: secondTurnId,
+      state: "completed",
+      requestedAt: timestamp,
+      startedAt: timestamp,
+      completedAt: timestamp,
+      assistantMessageId: secondAssistantMessageId,
+    },
+    messages: [
+      {
+        id: userMessageId,
+        role: "user",
+        text: "Build the source feature",
+        turnId: null,
+        streaming: false,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      },
+      {
+        id: commentaryMessageId,
+        role: "assistant",
+        text: "I am checking the implementation.",
+        turnId,
+        streaming: false,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      },
+      {
+        id: secondUserMessageId,
+        role: "user",
+        text: "Add a follow-up improvement",
+        turnId: null,
+        streaming: false,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      },
+      {
+        id: assistantMessageId,
+        role: "assistant",
+        text: "The source feature is complete.",
+        turnId,
+        streaming: false,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      },
+      {
+        id: secondAssistantMessageId,
+        role: "assistant",
+        text: "The follow-up is complete.",
+        turnId: secondTurnId,
+        streaming: false,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      },
+      {
+        id: failedUserMessageId,
+        role: "user",
+        text: "This turn failed before the provider started",
+        turnId: null,
+        streaming: false,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      },
+    ],
+    checkpoints: [
+      {
+        turnId,
+        checkpointTurnCount: 1,
+        checkpointRef: checkpointRefForThreadTurn(sourceThreadId, 1),
+        status: "ready",
+        files: [],
+        assistantMessageId,
+        completedAt: timestamp,
+      },
+      {
+        turnId: secondTurnId,
+        checkpointTurnCount: 2,
+        checkpointRef: checkpointRefForThreadTurn(sourceThreadId, 2),
+        status: "ready",
+        files: [],
+        assistantMessageId: secondAssistantMessageId,
+        completedAt: timestamp,
+      },
+    ],
+  };
+};
+
 const makeDefaultOrchestrationShellSnapshot = (threads: OrchestrationThreadShell[]) => ({
   snapshotSequence: 0,
   projects: [
@@ -460,6 +569,7 @@ const buildAppUnderTest = (options?: {
     orchestrationEngine?: Partial<OrchestrationEngine.OrchestrationEngineService["Service"]>;
     projectionSnapshotQuery?: Partial<ProjectionSnapshotQuery.ProjectionSnapshotQuery["Service"]>;
     checkpointDiffQuery?: Partial<CheckpointDiffQuery.CheckpointDiffQuery["Service"]>;
+    checkpointStore?: Partial<CheckpointStore.CheckpointStore["Service"]>;
     browserTraceCollector?: Partial<BrowserTraceCollector.BrowserTraceCollector["Service"]>;
     serverLifecycleEvents?: Partial<ServerLifecycleEvents.ServerLifecycleEvents["Service"]>;
     serverRuntimeStartup?: Partial<ServerRuntimeStartup.ServerRuntimeStartup["Service"]>;
@@ -868,27 +978,39 @@ const buildAppUnderTest = (options?: {
           getActiveProjectByWorkspaceRoot: () => Effect.succeed(Option.none()),
           getFirstActiveThreadIdByProjectId: () => Effect.succeed(Option.none()),
           getThreadCheckpointContext: () => Effect.succeed(Option.none()),
+          getThreadForkBoundaryBeforeMessage: () => Effect.succeed(Option.none()),
           ...options?.layers?.projectionSnapshotQuery,
         }),
       ),
       Layer.provide(
-        Layer.mock(CheckpointDiffQuery.CheckpointDiffQuery)({
-          getTurnDiff: () =>
-            Effect.succeed({
-              threadId: defaultThreadId,
-              fromTurnCount: 0,
-              toTurnCount: 0,
-              diff: "",
-            }),
-          getFullThreadDiff: () =>
-            Effect.succeed({
-              threadId: defaultThreadId,
-              fromTurnCount: 0,
-              toTurnCount: 0,
-              diff: "",
-            }),
-          ...options?.layers?.checkpointDiffQuery,
-        }),
+        Layer.mergeAll(
+          Layer.mock(CheckpointDiffQuery.CheckpointDiffQuery)({
+            getTurnDiff: () =>
+              Effect.succeed({
+                threadId: defaultThreadId,
+                fromTurnCount: 0,
+                toTurnCount: 0,
+                diff: "",
+              }),
+            getFullThreadDiff: () =>
+              Effect.succeed({
+                threadId: defaultThreadId,
+                fromTurnCount: 0,
+                toTurnCount: 0,
+                diff: "",
+              }),
+            ...options?.layers?.checkpointDiffQuery,
+          }),
+          Layer.mock(CheckpointStore.CheckpointStore)({
+            isGitRepository: () => Effect.succeed(false),
+            captureCheckpoint: () => Effect.void,
+            hasCheckpointRef: () => Effect.succeed(false),
+            restoreCheckpoint: () => Effect.succeed(false),
+            diffCheckpoints: () => Effect.succeed(""),
+            deleteCheckpointRefs: () => Effect.void,
+            ...options?.layers?.checkpointStore,
+          }),
+        ),
       ),
     );
 
@@ -8410,6 +8532,456 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         dispatchedCommands.map((command) => command.type),
         ["thread.archive", "thread.session.stop"],
       );
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect(
+    "forks an assistant message into a checkpoint-restored worktree and native conversation",
+    () =>
+      Effect.gen(function* () {
+        const source = makeForkSourceThread();
+        const project = {
+          ...makeDefaultOrchestrationReadModel().projects[0]!,
+          workspaceRoot: "/tmp/project",
+        };
+        const dispatchedCommands: Array<OrchestrationCommand> = [];
+        const createWorktree = vi.fn(
+          (input: Parameters<GitVcsDriver.GitVcsDriver["Service"]["createWorktree"]>[0]) =>
+            Effect.succeed({
+              worktree: {
+                path: input.path ?? "/tmp/unexpected-fork-worktree",
+                refName: input.newRefName ?? input.refName,
+              },
+            }),
+        );
+        const restoreCheckpoint = vi.fn(
+          (_: Parameters<CheckpointStore.CheckpointStore["Service"]["restoreCheckpoint"]>[0]) =>
+            Effect.succeed(true),
+        );
+        const forkConversation = vi.fn(
+          (_: Parameters<ProviderService.ProviderService["Service"]["forkConversation"]>[0]) =>
+            Effect.void,
+        );
+        const localStatus = {
+          isRepo: true,
+          hasPrimaryRemote: true,
+          isDefaultRef: false,
+          refName: "feature/source",
+          hasWorkingTreeChanges: false,
+          workingTree: { files: [], insertions: 0, deletions: 0 },
+        } as const;
+        const status = {
+          ...localStatus,
+          hasUpstream: true,
+          aheadCount: 0,
+          behindCount: 0,
+          pr: null,
+        } as const;
+
+        yield* buildAppUnderTest({
+          layers: {
+            vcsDriver: {
+              isInsideWorkTree: () => Effect.succeed(true),
+            },
+            gitManager: {
+              localStatus: () => Effect.succeed(localStatus),
+            },
+            gitVcsDriver: {
+              createWorktree,
+            },
+            vcsStatusBroadcaster: {
+              refreshStatus: () => Effect.succeed(status),
+            },
+            checkpointStore: {
+              hasCheckpointRef: () => Effect.succeed(true),
+              restoreCheckpoint,
+            },
+            providerService: {
+              forkConversation,
+              getInstanceInfo: (instanceId) =>
+                Effect.succeed({
+                  instanceId,
+                  driverKind: ProviderDriverKind.make("codex"),
+                  displayName: undefined,
+                  enabled: true,
+                  continuationIdentity: {
+                    driverKind: ProviderDriverKind.make("codex"),
+                    continuationKey: "codex:test",
+                  },
+                }),
+            },
+            projectionSnapshotQuery: {
+              getThreadDetailById: (threadId) =>
+                Effect.succeed(threadId === source.id ? Option.some(source) : Option.none()),
+              getProjectShellById: (projectId) =>
+                Effect.succeed(
+                  projectId === source.projectId ? Option.some(project) : Option.none(),
+                ),
+              getThreadForkBoundaryBeforeMessage: (_threadId, messageId) =>
+                Effect.succeed(
+                  messageId === MessageId.make("message-fork-user")
+                    ? Option.some({
+                        checkpointTurnCount: 0,
+                        checkpointRef: null,
+                        turnId: null,
+                      })
+                    : messageId === MessageId.make("message-fork-user-2")
+                      ? Option.some({
+                          checkpointTurnCount: 1,
+                          checkpointRef: checkpointRefForThreadTurn(source.id, 1),
+                          turnId: TurnId.make("turn-fork-source"),
+                        })
+                      : messageId === MessageId.make("message-fork-user-failed")
+                        ? Option.some({
+                            checkpointTurnCount: 2,
+                            checkpointRef: checkpointRefForThreadTurn(source.id, 2),
+                            turnId: TurnId.make("turn-fork-source-2"),
+                          })
+                        : Option.none(),
+                ),
+            },
+            orchestrationEngine: {
+              dispatch: (command) =>
+                Effect.sync(() => {
+                  dispatchedCommands.push(command);
+                  return { sequence: dispatchedCommands.length };
+                }),
+              readEvents: () => Stream.empty,
+            },
+          },
+        });
+
+        const wsUrl = yield* getWsServerUrl("/ws");
+        const commentaryFork = yield* Effect.scoped(
+          withWsRpcClient(wsUrl, (client) =>
+            client[ORCHESTRATION_WS_METHODS.forkThread]({
+              sourceThreadId: source.id,
+              sourceMessageId: MessageId.make("message-fork-commentary"),
+              cut: "through",
+              title: "Invalid commentary fork",
+            }),
+          ).pipe(Effect.result),
+        );
+        assertTrue(commentaryFork._tag === "Failure");
+        assert.equal(createWorktree.mock.calls.length, 0);
+
+        const result = yield* Effect.scoped(
+          withWsRpcClient(wsUrl, (client) =>
+            client[ORCHESTRATION_WS_METHODS.forkThread]({
+              sourceThreadId: source.id,
+              sourceMessageId: MessageId.make("message-fork-assistant"),
+              cut: "through",
+              title: "Forked source thread",
+            }),
+          ),
+        );
+
+        assert.equal(result.branch.startsWith("t3/fork-"), true);
+        assert.deepEqual(createWorktree.mock.calls[0]?.[0], {
+          cwd: "/tmp/project",
+          refName: "feature/source",
+          newRefName: result.branch,
+          path: result.worktreePath,
+        });
+        assert.deepEqual(restoreCheckpoint.mock.calls[0]?.[0], {
+          cwd: result.worktreePath,
+          checkpointRef: checkpointRefForThreadTurn(source.id, 1),
+        });
+        assert.deepEqual(forkConversation.mock.calls[0]?.[0], {
+          sourceThreadId: source.id,
+          targetThreadId: result.threadId,
+          lastTurnId: TurnId.make("turn-fork-source"),
+          cwd: result.worktreePath,
+          runtimeMode: "full-access",
+        });
+        assert.deepEqual(
+          dispatchedCommands.map((command) => command.type),
+          ["thread.create", "thread.activity.append"],
+        );
+        const lineage = dispatchedCommands[1];
+        assertTrue(lineage?.type === "thread.activity.append");
+        if (lineage?.type === "thread.activity.append") {
+          assert.equal(lineage.activity.kind, "thread.forked");
+          assert.deepEqual(lineage.activity.payload, {
+            parentThreadId: source.id,
+            parentMessageId: MessageId.make("message-fork-assistant"),
+            cut: "through",
+          });
+        }
+
+        const editedMidThread = yield* Effect.scoped(
+          withWsRpcClient(wsUrl, (client) =>
+            client[ORCHESTRATION_WS_METHODS.forkThread]({
+              sourceThreadId: source.id,
+              sourceMessageId: MessageId.make("message-fork-user-2"),
+              cut: "before",
+              title: "Edit the follow-up",
+            }),
+          ),
+        );
+        assert.deepEqual(restoreCheckpoint.mock.calls[1]?.[0], {
+          cwd: editedMidThread.worktreePath,
+          checkpointRef: checkpointRefForThreadTurn(source.id, 1),
+        });
+        assert.deepEqual(forkConversation.mock.calls[1]?.[0], {
+          sourceThreadId: source.id,
+          targetThreadId: editedMidThread.threadId,
+          lastTurnId: TurnId.make("turn-fork-source"),
+          cwd: editedMidThread.worktreePath,
+          runtimeMode: "full-access",
+        });
+
+        const edited = yield* Effect.scoped(
+          withWsRpcClient(wsUrl, (client) =>
+            client[ORCHESTRATION_WS_METHODS.forkThread]({
+              sourceThreadId: source.id,
+              sourceMessageId: MessageId.make("message-fork-user"),
+              cut: "before",
+              title: "Edit the first message",
+            }),
+          ),
+        );
+        assert.deepEqual(restoreCheckpoint.mock.calls[2]?.[0], {
+          cwd: edited.worktreePath,
+          checkpointRef: checkpointRefForThreadTurn(source.id, 0),
+        });
+        assert.equal(
+          forkConversation.mock.calls.length,
+          2,
+          "editing the first message must start a fresh Codex conversation",
+        );
+
+        const editedFailedTurn = yield* Effect.scoped(
+          withWsRpcClient(wsUrl, (client) =>
+            client[ORCHESTRATION_WS_METHODS.forkThread]({
+              sourceThreadId: source.id,
+              sourceMessageId: MessageId.make("message-fork-user-failed"),
+              cut: "before",
+              title: "Retry the failed message",
+            }),
+          ),
+        );
+        assert.deepEqual(restoreCheckpoint.mock.calls[3]?.[0], {
+          cwd: editedFailedTurn.worktreePath,
+          checkpointRef: checkpointRefForThreadTurn(source.id, 2),
+        });
+        assert.deepEqual(forkConversation.mock.calls[2]?.[0], {
+          sourceThreadId: source.id,
+          targetThreadId: editedFailedTurn.threadId,
+          lastTurnId: TurnId.make("turn-fork-source-2"),
+          cwd: editedFailedTurn.worktreePath,
+          runtimeMode: "full-access",
+        });
+      }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("cleans up failed checkpoint restores and native conversation forks", () =>
+    Effect.gen(function* () {
+      const source = makeForkSourceThread();
+      const project = {
+        ...makeDefaultOrchestrationReadModel().projects[0]!,
+        workspaceRoot: "/tmp/project",
+      };
+      const dispatchedCommands: Array<OrchestrationCommand> = [];
+      const removeWorktree = vi.fn(
+        (_: Parameters<GitVcsDriver.GitVcsDriver["Service"]["removeWorktree"]>[0]) => Effect.void,
+      );
+      const closeTerminal = vi.fn(
+        (_: Parameters<TerminalManager.TerminalManager["Service"]["close"]>[0]) => Effect.void,
+      );
+      const deleteBranch = vi.fn((_: Parameters<VcsDriver.VcsDriver["Service"]["execute"]>[0]) =>
+        Effect.succeed({
+          exitCode: ChildProcessSpawner.ExitCode(0),
+          stdout: "",
+          stderr: "",
+          stdoutTruncated: false,
+          stderrTruncated: false,
+        }),
+      );
+      const createWorktreeError = new GitCommandError({
+        operation: "GitVcsDriver.createWorktree",
+        command: "git worktree add",
+        cwd: "/tmp/project",
+        detail: "Git command timed out after creating the worktree",
+      });
+      let createWorktreeFails = true;
+      const createWorktree = vi.fn(
+        (input: Parameters<GitVcsDriver.GitVcsDriver["Service"]["createWorktree"]>[0]) =>
+          createWorktreeFails
+            ? Effect.fail(createWorktreeError)
+            : Effect.succeed({
+                worktree: {
+                  path: input.path ?? "/tmp/unexpected-fork-worktree",
+                  refName: input.newRefName ?? input.refName,
+                },
+              }),
+      );
+      let restoreResult = false;
+      const localStatus = {
+        isRepo: true,
+        hasPrimaryRemote: true,
+        isDefaultRef: false,
+        refName: "feature/source",
+        hasWorkingTreeChanges: false,
+        workingTree: { files: [], insertions: 0, deletions: 0 },
+      } as const;
+      const status = {
+        ...localStatus,
+        hasUpstream: true,
+        aheadCount: 0,
+        behindCount: 0,
+        pr: null,
+      } as const;
+
+      yield* buildAppUnderTest({
+        layers: {
+          vcsDriver: {
+            isInsideWorkTree: () => Effect.succeed(true),
+            execute: deleteBranch,
+          },
+          gitManager: {
+            localStatus: () => Effect.succeed(localStatus),
+          },
+          gitVcsDriver: {
+            createWorktree,
+            removeWorktree,
+          },
+          vcsStatusBroadcaster: {
+            refreshStatus: () => Effect.succeed(status),
+          },
+          checkpointStore: {
+            hasCheckpointRef: () => Effect.succeed(true),
+            restoreCheckpoint: () => Effect.succeed(restoreResult),
+          },
+          providerService: {
+            getInstanceInfo: (instanceId) =>
+              Effect.succeed({
+                instanceId,
+                driverKind: ProviderDriverKind.make("codex"),
+                displayName: undefined,
+                enabled: true,
+                continuationIdentity: {
+                  driverKind: ProviderDriverKind.make("codex"),
+                  continuationKey: "codex:test",
+                },
+              }),
+            forkConversation: () =>
+              Effect.fail(
+                new ProviderValidationError({
+                  operation: "test",
+                  issue: "native fork failed",
+                }),
+              ),
+          },
+          terminalManager: {
+            close: closeTerminal,
+          },
+          projectionSnapshotQuery: {
+            getThreadDetailById: (threadId) =>
+              Effect.succeed(threadId === source.id ? Option.some(source) : Option.none()),
+            getProjectShellById: (projectId) =>
+              Effect.succeed(projectId === source.projectId ? Option.some(project) : Option.none()),
+          },
+          orchestrationEngine: {
+            dispatch: (command) =>
+              Effect.sync(() => {
+                dispatchedCommands.push(command);
+                return { sequence: dispatchedCommands.length };
+              }),
+            readEvents: () => Stream.empty,
+          },
+        },
+      });
+
+      const wsUrl = yield* getWsServerUrl("/ws");
+      const createFailure = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          client[ORCHESTRATION_WS_METHODS.forkThread]({
+            sourceThreadId: source.id,
+            sourceMessageId: MessageId.make("message-fork-assistant"),
+            cut: "through",
+            title: "Fork whose worktree creation times out",
+          }),
+        ).pipe(Effect.result),
+      );
+      assertTrue(createFailure._tag === "Failure");
+      assertTrue(createFailure.failure._tag === "OrchestrationDispatchCommandError");
+      assert.include(createFailure.failure.message, "timed out");
+      assert.deepEqual(dispatchedCommands, []);
+      assert.equal(closeTerminal.mock.calls.length, 0);
+      assert.equal(removeWorktree.mock.calls.length, 1);
+      const timedOutWorktreePath = createWorktree.mock.calls[0]?.[0]?.path;
+      assert(typeof timedOutWorktreePath === "string");
+      assert.deepEqual(removeWorktree.mock.calls[0]?.[0], {
+        cwd: "/tmp/project",
+        path: timedOutWorktreePath,
+        force: true,
+      });
+      assert.equal(deleteBranch.mock.calls.length, 1);
+
+      createWorktreeFails = false;
+      removeWorktree.mockClear();
+      deleteBranch.mockClear();
+      const missingCheckpoint = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          client[ORCHESTRATION_WS_METHODS.forkThread]({
+            sourceThreadId: source.id,
+            sourceMessageId: MessageId.make("message-fork-assistant"),
+            cut: "through",
+            title: "Fork with a missing checkpoint",
+          }),
+        ).pipe(Effect.result),
+      );
+      assertTrue(missingCheckpoint._tag === "Failure");
+      assertTrue(missingCheckpoint.failure._tag === "OrchestrationDispatchCommandError");
+      assert.include(missingCheckpoint.failure.message, "no longer exists");
+      assert.deepEqual(dispatchedCommands, []);
+      assert.equal(closeTerminal.mock.calls.length, 0);
+      const missingCheckpointWorktreePath = createWorktree.mock.calls[1]?.[0]?.path;
+      assert(typeof missingCheckpointWorktreePath === "string");
+      assert.deepEqual(removeWorktree.mock.calls[0]?.[0], {
+        cwd: "/tmp/project",
+        path: missingCheckpointWorktreePath,
+        force: true,
+      });
+      assert.equal(deleteBranch.mock.calls.length, 1);
+      assert.equal(deleteBranch.mock.calls[0]?.[0]?.operation, "WsRpc.forkThread.deleteBranch");
+      assert.equal(deleteBranch.mock.calls[0]?.[0]?.cwd, "/tmp/project");
+      assert.deepEqual(deleteBranch.mock.calls[0]?.[0]?.args.slice(0, 3), ["branch", "-D", "--"]);
+      assert.equal(deleteBranch.mock.calls[0]?.[0]?.args[3]?.startsWith("t3/fork-"), true);
+
+      restoreResult = true;
+      removeWorktree.mockClear();
+      deleteBranch.mockClear();
+      const result = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          client[ORCHESTRATION_WS_METHODS.forkThread]({
+            sourceThreadId: source.id,
+            sourceMessageId: MessageId.make("message-fork-assistant"),
+            cut: "through",
+            title: "Fork that should fail",
+          }),
+        ).pipe(Effect.result),
+      );
+
+      assertTrue(result._tag === "Failure");
+      assertTrue(result.failure._tag === "OrchestrationDispatchCommandError");
+      assert.include(result.failure.message, "native fork failed");
+      assert.deepEqual(
+        dispatchedCommands.map((command) => command.type),
+        ["thread.create", "thread.activity.append", "thread.delete"],
+      );
+      assert.equal(closeTerminal.mock.calls.length, 1);
+      const nativeForkFailureWorktreePath = createWorktree.mock.calls[2]?.[0]?.path;
+      assert(typeof nativeForkFailureWorktreePath === "string");
+      assert.deepEqual(removeWorktree.mock.calls[0]?.[0], {
+        cwd: "/tmp/project",
+        path: nativeForkFailureWorktreePath,
+        force: true,
+      });
+      assert.equal(deleteBranch.mock.calls.length, 1);
+      assert.deepEqual(deleteBranch.mock.calls[0]?.[0]?.args.slice(0, 3), ["branch", "-D", "--"]);
+      assert.equal(deleteBranch.mock.calls[0]?.[0]?.args[3]?.startsWith("t3/fork-"), true);
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 

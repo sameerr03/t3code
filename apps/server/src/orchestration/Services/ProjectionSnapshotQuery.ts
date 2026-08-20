@@ -8,6 +8,7 @@
  */
 import type {
   CheckpointRef,
+  MessageId,
   OrchestrationCheckpointSummary,
   OrchestrationProject,
   OrchestrationProjectShell,
@@ -21,6 +22,7 @@ import type {
   OrchestrationThreadShell,
   ProjectId,
   ThreadId,
+  TurnId,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import type * as Option from "effect/Option";
@@ -52,6 +54,12 @@ export interface ProjectionFullThreadDiffContext {
   readonly worktreePath: string | null;
   readonly latestCheckpointTurnCount: number;
   readonly toCheckpointRef: CheckpointRef | null;
+}
+
+export interface ProjectionThreadForkBoundary {
+  readonly checkpointTurnCount: number;
+  readonly checkpointRef: CheckpointRef | null;
+  readonly turnId: TurnId | null;
 }
 
 /**
@@ -146,6 +154,12 @@ export interface ProjectionSnapshotQueryShape {
   readonly getThreadCheckpointContext: (
     threadId: ThreadId,
   ) => Effect.Effect<Option.Option<ProjectionThreadCheckpointContext>, ProjectionRepositoryError>;
+
+  /** Resolve the completed checkpoint immediately before a persisted user message's provider turn. */
+  readonly getThreadForkBoundaryBeforeMessage: (
+    threadId: ThreadId,
+    messageId: MessageId,
+  ) => Effect.Effect<Option.Option<ProjectionThreadForkBoundary>, ProjectionRepositoryError>;
 
   /**
    * Read only the narrow context needed to compute a full-thread diff from

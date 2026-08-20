@@ -30,6 +30,18 @@ export interface ProviderAdapterCapabilities {
    * Declares whether changing the model on an existing session is supported.
    */
   readonly sessionModelSwitch: ProviderSessionModelSwitchMode;
+  /** Native provider conversation forking, absent when unsupported. */
+  readonly threadFork?: "native";
+}
+
+export interface ProviderThreadForkInput {
+  readonly threadId: ThreadId;
+  readonly lastTurnId: TurnId;
+  readonly cwd: string;
+}
+
+export interface ProviderThreadForkResult {
+  readonly resumeCursor: unknown;
 }
 
 export interface ProviderThreadTurnSnapshot {
@@ -113,6 +125,11 @@ export interface ProviderAdapterShape<TError> {
     threadId: ThreadId,
     numTurns: number,
   ) => Effect.Effect<ProviderThreadSnapshot, TError>;
+
+  /** Fork provider-native conversation state at an inclusive completed turn. */
+  readonly forkThread?: (
+    input: ProviderThreadForkInput,
+  ) => Effect.Effect<ProviderThreadForkResult, TError>;
 
   /**
    * Stop all sessions owned by this adapter.

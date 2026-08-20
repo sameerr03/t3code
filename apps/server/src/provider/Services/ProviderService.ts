@@ -23,6 +23,8 @@ import type {
   ProviderStopSessionInput,
   ThreadId,
   ProviderTurnStartResult,
+  RuntimeMode,
+  TurnId,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import type * as Effect from "effect/Effect";
@@ -103,6 +105,15 @@ export interface ProviderServiceShape {
   readonly rollbackConversation: (input: {
     readonly threadId: ThreadId;
     readonly numTurns: number;
+  }) => Effect.Effect<void, ProviderServiceError>;
+
+  /** Fork provider-native conversation state and bind it to a new T3 thread. */
+  readonly forkConversation: (input: {
+    readonly sourceThreadId: ThreadId;
+    readonly targetThreadId: ThreadId;
+    readonly lastTurnId: TurnId;
+    readonly cwd: string;
+    readonly runtimeMode: RuntimeMode;
   }) => Effect.Effect<void, ProviderServiceError>;
 
   /**
