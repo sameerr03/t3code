@@ -300,7 +300,7 @@ function SidebarThreadTooltip({
                 environmentId={thread.environmentId}
                 cwd={projectCwd ?? ""}
                 faviconPath={projectFaviconPath}
-                className="size-3 shrink-0 rounded-[37.5%] stroke-muted-foreground"
+                className="size-3 shrink-0 stroke-muted-foreground"
               />
               <div className="min-w-0 truncate text-foreground/75">{projectTitle}</div>
             </div>
