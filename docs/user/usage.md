@@ -42,8 +42,9 @@ the dialog.
 **Usage → Limits** pools every subscription account it can see per provider, so with several Codex
 or Claude accounts across your environments and hubs you read one number per window rather than a
 list. Each window card shows how much of the pool is left and a bar with one segment per account,
-ordered by which resets soonest; when the provider reports reset times, the card also says when
-the next reset lands and how much it hands back. The hatched
+ordered by which resets soonest. When the provider reports reset times, the card says whether you
+are spending faster or slower than the window elapses, and with more than one account, which
+account resets next and how much of the pool that hands back. The hatched
 part of a segment is what that reset restores. Tap a segment or account row for the account's plan,
 where it is signed in, and its reset time. On web, you can hover too. Codex accounts with banked
 reset credits show a ticket count and the **Use reset** action in the account details. On narrow screens, numbered rows below

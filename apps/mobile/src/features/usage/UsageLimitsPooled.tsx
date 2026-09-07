@@ -7,6 +7,7 @@ import {
   collectLimitPools,
   formatDuration,
   formatResetsIn,
+  PACE_LABEL,
   remainingPercent,
   type LimitAccount,
   type LimitPoolWindow,
@@ -26,7 +27,6 @@ import { ResetCredits } from "./UsageLimitsSection";
 import { useProviderColors } from "./usageProviders";
 
 const DRIVER_LABEL: Partial<Record<string, string>> = { codex: "Codex", claudeAgent: "Claude" };
-const PACE_LABEL = { ahead: "Ahead of pace", on: "On pace", under: "Under pace" } as const;
 
 function accountName(account: LimitAccount) {
   if (account.displayName) return account.displayName;
@@ -78,7 +78,9 @@ function PoolWindowCard({
   readonly environmentIds: readonly string[] | null;
 }) {
   const navigation = useNavigation();
-  const nextRefill = pool.resets.find((reset) => reset.restoresPercent > 0);
+  // Only worth a line with several accounts; with one it restates the number and the segment.
+  const nextRefill =
+    pool.members.length > 1 ? pool.resets.find((reset) => reset.restoresPercent > 0) : undefined;
   const openAccount = (account: LimitAccount) =>
     navigation.navigate("SettingsSheet", {
       screen: "SettingsContent",
@@ -95,26 +97,27 @@ function PoolWindowCard({
     });
   return (
     <View className="gap-3 rounded-[24px] border-continuous bg-card p-4">
-      <View className="flex-row items-start justify-between gap-3">
-        <View className="gap-1">
-          <Text className="text-sm font-t3-medium text-foreground">{pool.label}</Text>
-          <View className="flex-row items-baseline gap-1.5">
-            <Text className="text-3xl font-t3-bold tabular-nums text-foreground">
-              {pool.remainingPercent}%
-            </Text>
-            <Text className="text-sm text-foreground-muted">left</Text>
-          </View>
+      <View className="gap-1">
+        <Text className="text-sm font-t3-medium text-foreground">{pool.label}</Text>
+        <View className="flex-row items-baseline gap-1.5">
+          <Text className="text-3xl font-t3-bold tabular-nums text-foreground">
+            {pool.remainingPercent}%
+          </Text>
+          <Text className="text-sm text-foreground-muted">left</Text>
         </View>
         {pool.pace ? (
-          <Text className="text-xs text-foreground-tertiary">{PACE_LABEL[pool.pace]}</Text>
+          <Text className="text-xs text-foreground-muted">{PACE_LABEL[pool.pace]}</Text>
+        ) : null}
+        {nextRefill ? (
+          <Text className="text-xs tabular-nums text-foreground-muted">
+            <Text className="font-t3-medium text-foreground">
+              {accountName(nextRefill.member.account)}
+            </Text>{" "}
+            resets {nextRefill.at <= now ? "now" : `in ${formatDuration(nextRefill.at - now)}`},
+            restoring {nextRefill.restoresPercent}%
+          </Text>
         ) : null}
       </View>
-      {nextRefill ? (
-        <Text className="text-xs tabular-nums text-foreground-muted">
-          ↻ +{nextRefill.restoresPercent}%{" "}
-          {nextRefill.at <= now ? "now" : `in ${formatDuration(nextRefill.at - now)}`}
-        </Text>
-      ) : null}
       <View className="flex-row gap-1">
         {pool.members.map(({ account, window }, index) => (
           <Pressable

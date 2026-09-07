@@ -13,6 +13,7 @@ import {
   formatDuration,
   formatResetsIn,
   limitsNotice,
+  PACE_LABEL,
   paceOf,
   remainingPercent,
 } from "@t3tools/shared/usageLimits";
@@ -25,8 +26,6 @@ import { environmentPresentations } from "../../state/presentation";
 import { serverEnvironment } from "../../state/server";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { useProviderColors } from "./usageProviders";
-
-const PACE_LABEL = { ahead: "ahead of pace", on: "on pace", under: "under pace" } as const;
 
 type Driver = ServerProvider["driver"];
 

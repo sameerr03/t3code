@@ -8,6 +8,7 @@ import {
   type LimitPool,
   type LimitPoolMember,
   type LimitPoolWindow,
+  PACE_LABEL,
   remainingPercent,
 } from "@t3tools/shared/usageLimits";
 import { TicketIcon } from "lucide-react";
@@ -21,13 +22,7 @@ import { getDriverOption } from "../settings/providerDriverMeta";
 import { RedactedSensitiveText } from "../settings/RedactedSensitiveText";
 import { Button } from "../ui/button";
 import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
-import {
-  PaceIcon,
-  ResetCreditDialog,
-  barColor,
-  resetCreditsSummary,
-  useResetCredit,
-} from "./UsageLimits";
+import { ResetCreditDialog, barColor, resetCreditsSummary, useResetCredit } from "./UsageLimits";
 
 /** `someone@example.com` → `SE`: enough to tell accounts apart, too little to identify one. */
 function accountInitials(email: string): string {
@@ -468,9 +463,10 @@ function PoolBar({
 }
 
 /**
- * Big pooled number and the segment bar. The bar is sorted by reset, so who
- * refills next is its left edge; the exact time and share restored live in
- * each segment's popover rather than a list restating the bar.
+ * Big pooled number, pace in words, and the segment bar. With several
+ * accounts the card also names who refills next and how much of the pool
+ * that hands back, since the big number alone cannot say. With one account
+ * that would only restate the number and the segment, so it is left out.
  */
 function PoolWindowCard({
   pool,
@@ -482,7 +478,8 @@ function PoolWindowCard({
   readonly now: number;
 }) {
   // The soonest reset that hands anything back; an untouched account resets to no effect.
-  const nextRefill = pool.resets.find((reset) => reset.restoresPercent > 0);
+  const nextRefill =
+    pool.members.length > 1 ? pool.resets.find((reset) => reset.restoresPercent > 0) : undefined;
   return (
     <div className="grid items-center gap-x-6 gap-y-3 rounded-lg border border-border/60 p-4 md:grid-cols-[11rem_minmax(0,1fr)]">
       <div className="flex flex-col gap-1">
@@ -492,12 +489,20 @@ function PoolWindowCard({
             {pool.remainingPercent}%
           </span>
           <span className="text-sm text-muted-foreground">left</span>
-          {pool.pace ? <PaceIcon pace={pool.pace} /> : null}
         </span>
+        {pool.pace ? (
+          <span className="text-xs text-muted-foreground">{PACE_LABEL[pool.pace]}</span>
+        ) : null}
         {nextRefill ? (
-          <span className="text-xs text-muted-foreground tabular-nums">
-            <span className="font-medium text-foreground">↻ +{nextRefill.restoresPercent}%</span>{" "}
-            {nextRefill.at <= now ? "now" : `in ${formatDuration(nextRefill.at - now)}`}
+          <span className="flex flex-wrap items-center gap-x-1 text-xs text-muted-foreground tabular-nums">
+            <AccountName
+              account={nextRefill.member.account}
+              className="min-w-0 truncate font-medium text-foreground"
+            />
+            <span>
+              resets {nextRefill.at <= now ? "now" : `in ${formatDuration(nextRefill.at - now)}`},
+              restoring {nextRefill.restoresPercent}%
+            </span>
           </span>
         ) : null}
       </div>
