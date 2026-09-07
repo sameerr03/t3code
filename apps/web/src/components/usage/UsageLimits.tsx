@@ -13,6 +13,7 @@ import {
   formatDuration,
   formatResetsIn,
   type LimitPace,
+  PACE_LABEL,
   paceOf,
   remainingPercent,
 } from "@t3tools/shared/usageLimits";
@@ -38,10 +39,10 @@ import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { UsageLimitsPooled } from "./UsageLimitsPooled";
 import { PROVIDER_PRESENTATION } from "./usageProviders";
 
-const PACE: Record<LimitPace, { readonly label: string; readonly icon: typeof GaugeIcon }> = {
-  ahead: { label: "Ahead of pace: spending faster than the window elapses", icon: TrendingUpIcon },
-  on: { label: "On pace with the window", icon: GaugeIcon },
-  under: { label: "Under pace: headroom left for the rest of the window", icon: TrendingDownIcon },
+const PACE_ICON: Record<LimitPace, typeof GaugeIcon> = {
+  ahead: TrendingUpIcon,
+  on: GaugeIcon,
+  under: TrendingDownIcon,
 };
 
 /** The series colour the cost chart uses for this driver, so the two views read as one. */
@@ -51,23 +52,26 @@ export function barColor(driver: ServerProvider["driver"]): string {
   return kind ? PROVIDER_PRESENTATION[kind].color : "var(--foreground)";
 }
 
-/** Pace as a glyph with the words on hover. */
-export function PaceIcon({ pace }: { readonly pace: LimitPace }) {
-  const Icon = PACE[pace].icon;
+/**
+ * Pace as a glyph with the words on hover, for rows whose bar already draws
+ * the even-spending mark the glyph summarises.
+ */
+function PaceIcon({ pace }: { readonly pace: LimitPace }) {
+  const Icon = PACE_ICON[pace];
   return (
     <Tooltip>
       <TooltipTrigger
         render={
           <span
             role="img"
-            aria-label={PACE[pace].label}
+            aria-label={PACE_LABEL[pace]}
             className="inline-flex text-muted-foreground"
           />
         }
       >
         <Icon className="size-3.5" aria-hidden />
       </TooltipTrigger>
-      <TooltipPopup side="top">{PACE[pace].label}</TooltipPopup>
+      <TooltipPopup side="top">{PACE_LABEL[pace]}</TooltipPopup>
     </Tooltip>
   );
 }
