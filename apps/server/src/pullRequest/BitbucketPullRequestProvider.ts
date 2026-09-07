@@ -84,6 +84,9 @@ function toChangeRequest(pullRequest: BitbucketPullRequest): ProviderChangeReque
     url: pullRequest.url,
     author: pullRequest.author,
     headBranch: pullRequest.headBranch,
+    ...(pullRequest.headRepositoryNameWithOwner
+      ? { headRepositoryNameWithOwner: pullRequest.headRepositoryNameWithOwner }
+      : {}),
     baseBranch: pullRequest.baseBranch,
     state: pullRequest.state,
     isDraft: pullRequest.isDraft,
@@ -172,8 +175,8 @@ export const make = Effect.gen(function* () {
             deletions: diffStat.deletions,
             changedFiles: diffStat.changedFiles,
             body: pullRequest.body,
-            mergedAt: pullRequest.state === "merged" ? pullRequest.updatedAt : null,
-            closedAt: pullRequest.state === "closed" ? pullRequest.updatedAt : null,
+            mergedAt: null,
+            closedAt: null,
             reviewers: pullRequest.reviewers,
             checks,
             // Bitbucket publishes no per-repository list of allowed strategies, so the ones it
