@@ -10,8 +10,8 @@ import {
   useState,
   type Ref,
 } from "react";
-import type { NativeSyntheticEvent, ViewProps } from "react-native";
-import { Image, StyleSheet } from "react-native";
+import type { ColorValue, NativeSyntheticEvent, ViewProps } from "react-native";
+import { Image, Platform, processColor, StyleSheet } from "react-native";
 
 import { markdownFileIconSource } from "@t3tools/mobile-markdown-text/file-icons";
 import { resolveMarkdownFileIcon } from "@t3tools/mobile-markdown-text/links";
@@ -77,6 +77,15 @@ interface NativeComposerEditorProps extends ViewProps {
 }
 
 const NativeView = requireNativeView<NativeComposerEditorProps>(NATIVE_MODULE_NAME);
+
+// The Android editor parses hex as AARRGGBB; theme colors use CSS formats.
+function composerThemeColor(color: ColorValue): string {
+  if (Platform.OS !== "android") return String(color);
+  const processed = processColor(color);
+  return typeof processed === "number"
+    ? `#${(processed >>> 0).toString(16).padStart(8, "0")}`
+    : String(color);
+}
 
 function basename(path: string): string {
   const separator = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
@@ -212,15 +221,15 @@ export function ComposerEditor({
     [],
   );
   const themeJson = JSON.stringify({
-    text: theme["--color-foreground"],
-    placeholder: theme["--color-placeholder"],
-    chipBackground: theme["--color-subtle"],
-    chipBorder: theme["--color-border"],
-    chipText: theme["--color-foreground"],
-    skillBackground: theme["--color-inline-skill-background"],
-    skillBorder: theme["--color-inline-skill-border"],
-    skillText: theme["--color-inline-skill-foreground"],
-    fileTint: theme["--color-icon-muted"],
+    text: composerThemeColor(theme["--color-foreground"]),
+    placeholder: composerThemeColor(theme["--color-placeholder"]),
+    chipBackground: composerThemeColor(theme["--color-subtle"]),
+    chipBorder: composerThemeColor(theme["--color-border"]),
+    chipText: composerThemeColor(theme["--color-foreground"]),
+    skillBackground: composerThemeColor(theme["--color-inline-skill-background"]),
+    skillBorder: composerThemeColor(theme["--color-inline-skill-border"]),
+    skillText: composerThemeColor(theme["--color-inline-skill-foreground"]),
+    fileTint: composerThemeColor(theme["--color-icon-muted"]),
   });
   const resolvedTextStyle = StyleSheet.flatten(textStyle) ?? {};
   const regularFontFamily = useFontFamily("regular");

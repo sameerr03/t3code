@@ -16,6 +16,7 @@ import android.view.Gravity
 import android.view.ViewGroup
 import android.view.inputmethod.InputMethodManager
 import android.widget.EditText
+import androidx.core.graphics.PathParser
 import expo.modules.kotlin.AppContext
 import expo.modules.kotlin.viewevent.EventDispatcher
 import expo.modules.kotlin.views.ExpoView
@@ -379,6 +380,23 @@ private class ComposerChipSpan(
   private val verticalPadding = 2f * density
   private val cornerRadius = 6f * density
   private val borderWidth = density
+  private val iconPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+    style = Paint.Style.STROKE
+    strokeWidth = 1.85f
+    strokeCap = Paint.Cap.ROUND
+    strokeJoin = Paint.Join.ROUND
+  }
+
+  private fun iconWidth(paint: Paint): Float =
+    if (skill) paint.textSize * (1.17f + 0.33f) else 0f
+
+  companion object {
+    // Same 24-unit cube path as the desktop composer skill chip.
+    private val skillIcon = requireNotNull(PathParser.createPathFromPathData(
+      "M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z " +
+        "M3.3 7l8.7 5 8.7-5 M12 22V12"
+    ))
+  }
 
   override fun getSize(
     paint: Paint,
@@ -395,7 +413,7 @@ private class ComposerChipSpan(
       it.descent = base.descent + extra
       it.bottom = base.bottom + extra
     }
-    return (paint.measureText(label) + horizontalPadding * 2).toInt()
+    return (paint.measureText(label) + iconWidth(paint) + horizontalPadding * 2).toInt()
   }
 
   override fun draw(
@@ -409,7 +427,8 @@ private class ComposerChipSpan(
     bottom: Int,
     paint: Paint
   ) {
-    val width = paint.measureText(label) + horizontalPadding * 2
+    val iconWidth = iconWidth(paint)
+    val width = paint.measureText(label) + iconWidth + horizontalPadding * 2
     val metrics = paint.fontMetrics
     val rect = RectF(
       x,
@@ -430,7 +449,17 @@ private class ComposerChipSpan(
     canvas.drawRoundRect(rect, cornerRadius, cornerRadius, paint)
     paint.color = if (skill) theme.skillText else theme.chipText
     paint.style = Paint.Style.FILL
-    canvas.drawText(label, x + horizontalPadding, y.toFloat(), paint)
+    if (skill) {
+      val iconSize = paint.textSize * 1.17f
+      iconPaint.color = theme.skillText
+      iconPaint.alpha = (Color.alpha(theme.skillText) * 0.85f).toInt()
+      val saveCount = canvas.save()
+      canvas.translate(x + horizontalPadding, rect.centerY() - iconSize / 2)
+      canvas.scale(iconSize / 24f, iconSize / 24f)
+      canvas.drawPath(skillIcon, iconPaint)
+      canvas.restoreToCount(saveCount)
+    }
+    canvas.drawText(label, x + horizontalPadding + iconWidth, y.toFloat(), paint)
 
     paint.color = originalColor
     paint.style = originalStyle
