@@ -10,8 +10,8 @@ import {
   useState,
   type Ref,
 } from "react";
-import type { NativeSyntheticEvent, ViewProps } from "react-native";
-import { Image, StyleSheet } from "react-native";
+import type { ColorValue, NativeSyntheticEvent, ViewProps } from "react-native";
+import { Image, Platform, processColor, StyleSheet } from "react-native";
 
 import { markdownFileIconSource } from "@t3tools/mobile-markdown-text/file-icons";
 import { resolveMarkdownFileIcon } from "@t3tools/mobile-markdown-text/links";
@@ -77,6 +77,15 @@ interface NativeComposerEditorProps extends ViewProps {
 }
 
 const NativeView = requireNativeView<NativeComposerEditorProps>(NATIVE_MODULE_NAME);
+
+// The Android editor parses hex as AARRGGBB; theme colors use CSS formats.
+function composerThemeColor(color: ColorValue): string {
+  if (Platform.OS !== "android") return String(color);
+  const processed = processColor(color);
+  return typeof processed === "number"
+    ? `#${(processed >>> 0).toString(16).padStart(8, "0")}`
+    : String(color);
+}
 
 function basename(path: string): string {
   const separator = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
@@ -220,15 +229,15 @@ export function ComposerEditor({
     [],
   );
   const themeJson = JSON.stringify({
-    text: String(textColor),
-    placeholder: String(placeholderColor),
-    chipBackground: String(chipBackground),
-    chipBorder: String(chipBorder),
-    chipText: String(chipText),
-    skillBackground: String(skillBackground),
-    skillBorder: String(skillBorder),
-    skillText: String(skillText),
-    fileTint: String(fileTint),
+    text: composerThemeColor(textColor),
+    placeholder: composerThemeColor(placeholderColor),
+    chipBackground: composerThemeColor(chipBackground),
+    chipBorder: composerThemeColor(chipBorder),
+    chipText: composerThemeColor(chipText),
+    skillBackground: composerThemeColor(skillBackground),
+    skillBorder: composerThemeColor(skillBorder),
+    skillText: composerThemeColor(skillText),
+    fileTint: composerThemeColor(fileTint),
   });
   const resolvedTextStyle = StyleSheet.flatten(textStyle) ?? {};
   const regularFontFamily = useFontFamily("regular");
