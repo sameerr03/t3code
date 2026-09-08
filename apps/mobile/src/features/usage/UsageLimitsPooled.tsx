@@ -7,6 +7,8 @@ import {
   collectLimitPools,
   formatDuration,
   formatResetsIn,
+  type LimitPace,
+  PACE_LABEL,
   remainingPercent,
   type LimitAccount,
   type LimitPoolWindow,
@@ -17,7 +19,7 @@ import { Defs, Path, Pattern, Rect, Svg } from "react-native-svg";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { AndroidScreenHeader } from "../../components/AndroidScreenHeader";
-import { SymbolView } from "../../components/AppSymbol";
+import { type AppSymbolName, SymbolView } from "../../components/AppSymbol";
 import { AppText as Text } from "../../components/AppText";
 import { ProviderIcon } from "../../components/ProviderIcon";
 import { NativeStackScreenOptions } from "../../native/StackHeader";
@@ -26,7 +28,11 @@ import { ResetCredits } from "./UsageLimitsSection";
 import { useProviderColors } from "./usageProviders";
 
 const DRIVER_LABEL: Partial<Record<string, string>> = { codex: "Codex", claudeAgent: "Claude" };
-const PACE_LABEL = { ahead: "Ahead of pace", on: "On pace", under: "Under pace" } as const;
+const PACE_SYMBOL: Record<LimitPace, AppSymbolName> = {
+  ahead: "chart.line.uptrend.xyaxis",
+  on: "gauge.medium",
+  under: "chart.line.downtrend.xyaxis",
+};
 
 function accountName(account: LimitAccount) {
   if (account.displayName) return account.displayName;
@@ -106,12 +112,19 @@ function PoolWindowCard({
           </View>
         </View>
         {pool.pace ? (
-          <Text className="text-xs text-foreground-tertiary">{PACE_LABEL[pool.pace]}</Text>
+          <View className="flex-row items-center gap-1">
+            <SymbolView
+              name={PACE_SYMBOL[pool.pace]}
+              size={13}
+              tintColorClassName="accent-foreground-tertiary"
+            />
+            <Text className="text-xs text-foreground-tertiary">{PACE_LABEL[pool.pace]}</Text>
+          </View>
         ) : null}
       </View>
       {nextRefill ? (
         <Text className="text-xs tabular-nums text-foreground-muted">
-          ↻ +{nextRefill.restoresPercent}%{" "}
+          ↻{pool.members.length > 1 ? ` +${nextRefill.restoresPercent}%` : ""}{" "}
           {nextRefill.at <= now ? "now" : `in ${formatDuration(nextRefill.at - now)}`}
         </Text>
       ) : null}

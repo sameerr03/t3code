@@ -32,6 +32,8 @@ import IconChevronUp from "@tabler/icons-react-native/IconChevronUp";
 import IconCircleCheck from "@tabler/icons-react-native/IconCircleCheck";
 import IconCircleXFilled from "@tabler/icons-react-native/IconCircleXFilled";
 import IconTicket from "@tabler/icons-react-native/IconTicket";
+import IconTrendingDown from "@tabler/icons-react-native/IconTrendingDown";
+import IconTrendingUp from "@tabler/icons-react-native/IconTrendingUp";
 import IconClock from "@tabler/icons-react-native/IconClock";
 import IconCode from "@tabler/icons-react-native/IconCode";
 import IconCopy from "@tabler/icons-react-native/IconCopy";
@@ -48,6 +50,7 @@ import IconFilterFilled from "@tabler/icons-react-native/IconFilterFilled";
 import IconFolder from "@tabler/icons-react-native/IconFolder";
 import IconFolderOpen from "@tabler/icons-react-native/IconFolderOpen";
 import IconFolderPlus from "@tabler/icons-react-native/IconFolderPlus";
+import IconGauge from "@tabler/icons-react-native/IconGauge";
 import IconGitBranch from "@tabler/icons-react-native/IconGitBranch";
 import IconGitMerge from "@tabler/icons-react-native/IconGitMerge";
 import IconGitPullRequest from "@tabler/icons-react-native/IconGitPullRequest";
@@ -115,6 +118,8 @@ const ANDROID_ICON_BY_SF_SYMBOL: Partial<Record<SFSymbol, Icon>> = {
   brain: IconBrain,
   camera: IconCamera,
   "chart.bar.xaxis": IconChartBar,
+  "chart.line.downtrend.xyaxis": IconTrendingDown,
+  "chart.line.uptrend.xyaxis": IconTrendingUp,
   checkmark: IconCheck,
   "checkmark.circle": IconCircleCheck,
   clock: IconClock,
@@ -137,6 +142,7 @@ const ANDROID_ICON_BY_SF_SYMBOL: Partial<Record<SFSymbol, Icon>> = {
   folder: IconFolder,
   "folder.badge.plus": IconFolderPlus,
   "folder.fill": IconFolder,
+  "gauge.medium": IconGauge,
   gearshape: IconSettings,
   "info.circle": IconInfoCircle,
   laptopcomputer: IconDeviceLaptop,
