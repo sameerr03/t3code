@@ -30,6 +30,27 @@ describe("applyCtrlModifier", () => {
 });
 
 describe("resolveModifiedTerminalInput", () => {
+  it("encodes Ctrl and Alt arrows as modified cursor keys", () => {
+    for (const direction of ["A", "B", "C", "D"]) {
+      for (const prefix of ["[", "O"]) {
+        expect(
+          resolveModifiedTerminalInput({
+            data: `${ESC}${prefix}${direction}`,
+            modifier: "ctrl",
+            hostPlatform: "linux",
+          }),
+        ).toEqual({ kind: "write", data: `${ESC}[1;5${direction}` });
+        expect(
+          resolveModifiedTerminalInput({
+            data: `${ESC}${prefix}${direction}`,
+            modifier: "meta",
+            hostPlatform: "linux",
+          }),
+        ).toEqual({ kind: "write", data: `${ESC}[1;3${direction}` });
+      }
+    }
+  });
+
   it("pastes on ctrl+v for windows, linux, and unknown hosts", () => {
     for (const hostPlatform of ["windows", "linux", "unknown"] as const) {
       expect(resolveModifiedTerminalInput({ data: "v", modifier: "ctrl", hostPlatform })).toEqual({

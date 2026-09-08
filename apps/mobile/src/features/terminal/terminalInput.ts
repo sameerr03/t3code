@@ -59,6 +59,16 @@ export function resolveModifiedTerminalInput(input: {
     return { kind: "paste" };
   }
 
+  // Cursor keys use a CSI modifier parameter, rather than a control byte or ESC prefix.
+  // eslint-disable-next-line no-control-regex -- Match terminal cursor-key sequences.
+  const arrow = /^\u001b(?:\[|O)([ABCD])$/.exec(input.data);
+  if (arrow) {
+    return {
+      kind: "write",
+      data: `\u001b[1;${input.modifier === "ctrl" ? 5 : 3}${arrow[1]}`,
+    };
+  }
+
   return {
     kind: "write",
     data: input.modifier === "ctrl" ? applyCtrlModifier(input.data) : `\u001b${input.data}`,

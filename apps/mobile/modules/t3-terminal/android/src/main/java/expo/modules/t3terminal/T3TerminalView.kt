@@ -229,6 +229,20 @@ class T3TerminalView(context: Context, appContext: AppContext) : ExpoView(contex
     }
     inputView.setOnKeyListener { _, keyCode, event ->
       if (event.action != KeyEvent.ACTION_DOWN) return@setOnKeyListener false
+      val arrow = when (keyCode) {
+        KeyEvent.KEYCODE_DPAD_UP -> "A"
+        KeyEvent.KEYCODE_DPAD_DOWN -> "B"
+        KeyEvent.KEYCODE_DPAD_RIGHT -> "C"
+        KeyEvent.KEYCODE_DPAD_LEFT -> "D"
+        else -> null
+      }
+      if (arrow != null) {
+        val modifier = 1 + (if (event.isShiftPressed) 1 else 0) +
+          (if (event.isAltPressed) 2 else 0) + (if (event.isCtrlPressed) 4 else 0)
+        val sequence = if (modifier == 1) "\u001B[$arrow" else "\u001B[1;$modifier$arrow"
+        onInput(mapOf("data" to sequence))
+        return@setOnKeyListener true
+      }
       when {
         keyCode == KeyEvent.KEYCODE_DEL -> {
           onInput(mapOf("data" to "\u007F"))

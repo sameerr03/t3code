@@ -1,16 +1,19 @@
 import { DEFAULT_TERMINAL_ID, EnvironmentId, ThreadId } from "@t3tools/contracts";
 import { type KnownTerminalSession } from "@t3tools/client-runtime/state/terminal";
 import type { MenuAction } from "@react-native-menu/menu";
-import { SymbolView } from "../../components/AppSymbol";
 import { NativeHeaderToolbar, NativeStackScreenOptions } from "../../native/StackHeader";
-import { StackActions, useNavigation, type StaticScreenProps } from "@react-navigation/native";
+import {
+  StackActions,
+  useIsFocused,
+  useNavigation,
+  type StaticScreenProps,
+} from "@react-navigation/native";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Platform, Pressable, View } from "react-native";
+import { Platform, View } from "react-native";
 import * as Clipboard from "expo-clipboard";
 import * as Schema from "effect/Schema";
 import {
   KeyboardController,
-  KeyboardEvents,
   KeyboardStickyView,
   useKeyboardState,
 } from "react-native-keyboard-controller";
@@ -23,7 +26,6 @@ import {
 } from "../../components/ComposerToolbar";
 import { ControlPillMenu } from "../../components/ControlPill";
 import { EmptyState } from "../../components/EmptyState";
-import { GlassSurface } from "../../components/GlassSurface";
 import { LoadingScreen } from "../../components/LoadingScreen";
 import { environmentCatalog } from "../../connection/catalog";
 import { useEnvironmentPresentation } from "../../state/presentation";
@@ -46,6 +48,8 @@ import { useThreadSelection } from "../../state/use-thread-selection";
 import { useSelectedThreadDetail } from "../../state/use-thread-detail";
 import { EnvironmentConnectionNotice } from "../connection/EnvironmentConnectionNotice";
 import { useAdaptiveWorkspaceLayout } from "../layout/AdaptiveWorkspaceLayout";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
+import { TerminalArrowControls } from "./TerminalArrowControls";
 import { TerminalSurface } from "./NativeTerminalSurface";
 import { getMobileTerminalTheme } from "./terminalTheme";
 import { terminalDebugLog } from "./terminalDebugLog";
@@ -245,7 +249,8 @@ export function ThreadTerminalRouteScreen(props: ThreadTerminalRouteScreenProps)
     },
   );
   const [keyboardFocusRequest, setKeyboardFocusRequest] = useState(0);
-  const [isAccessoryDismissed, setIsAccessoryDismissed] = useState(false);
+  const isFocused = useIsFocused();
+  const insets = useSafeAreaInsets();
   const bufferReplayTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const firstNonEmptyBufferLoggedRef = useRef(false);
   const lastBufferReplayKeyRef = useRef<string | null>(null);
@@ -493,10 +498,6 @@ export function ThreadTerminalRouteScreen(props: ThreadTerminalRouteScreenProps)
       { kind: "send", key: "tab", label: "tab", data: "\t" },
       { kind: "paste", key: "paste", label: "paste" },
       { kind: "clear", key: "clear", label: "clear" },
-      { kind: "send", key: "up", label: "↑", data: "\u001b[A" },
-      { kind: "send", key: "down", label: "↓", data: "\u001b[B" },
-      { kind: "send", key: "left", label: "←", data: "\u001b[D" },
-      { kind: "send", key: "right", label: "→", data: "\u001b[C" },
       { kind: "send", key: "tilde", label: "~", data: "~" },
       { kind: "send", key: "pipe", label: "|", data: "|" },
       { kind: "send", key: "slash", label: "/", data: "/" },
@@ -507,24 +508,11 @@ export function ThreadTerminalRouteScreen(props: ThreadTerminalRouteScreenProps)
     height: state.height,
     isVisible: state.isVisible,
   }));
-  const isAccessoryVisible = keyboardState.isVisible && !isAccessoryDismissed;
+  const accessoryBottomInset = keyboardState.isVisible ? 0 : insets.bottom;
   const terminalBottomInset =
     (keyboardState.isVisible ? keyboardState.height : 0) +
-    (isAccessoryVisible ? TERMINAL_ACCESSORY_HEIGHT : 0);
-
-  useEffect(() => {
-    const keyboardWillShow = KeyboardEvents.addListener("keyboardWillShow", () => {
-      setIsAccessoryDismissed(false);
-    });
-    const keyboardWillHide = KeyboardEvents.addListener("keyboardWillHide", () => {
-      setIsAccessoryDismissed(true);
-    });
-
-    return () => {
-      keyboardWillShow.remove();
-      keyboardWillHide.remove();
-    };
-  }, []);
+    TERMINAL_ACCESSORY_HEIGHT +
+    accessoryBottomInset;
 
   const terminalMenuSessions = useMemo<ReadonlyArray<TerminalMenuSession>>(
     () =>
@@ -743,10 +731,9 @@ export function ThreadTerminalRouteScreen(props: ThreadTerminalRouteScreenProps)
 
   /** Sends a key through the armed toolbar modifier, if any, and disarms it. */
   const writeModifiedInput = useCallback(
-    (data: string) => {
+    async (data: string): Promise<boolean> => {
       if (pendingModifier === null) {
-        void writeInput(data);
-        return;
+        return writeInput(data);
       }
 
       setPendingModifierState({ terminalId, value: null });
@@ -756,10 +743,10 @@ export function ThreadTerminalRouteScreen(props: ThreadTerminalRouteScreenProps)
         hostPlatform,
       });
       if (resolved.kind === "paste") {
-        void pasteFromClipboard();
-        return;
+        await pasteFromClipboard();
+        return false;
       }
-      void writeInput(resolved.data);
+      return writeInput(resolved.data);
     },
     [hostPlatform, pasteFromClipboard, pendingModifier, terminalId, writeInput],
   );
@@ -770,7 +757,7 @@ export function ThreadTerminalRouteScreen(props: ThreadTerminalRouteScreenProps)
         return;
       }
 
-      writeModifiedInput(data);
+      void writeModifiedInput(data);
     },
     [writeModifiedInput],
   );
@@ -1072,13 +1059,12 @@ export function ThreadTerminalRouteScreen(props: ThreadTerminalRouteScreenProps)
         return;
       }
 
-      writeModifiedInput(action.data);
+      void writeModifiedInput(action.data);
     },
     [handleClearTerminal, pasteFromClipboard, terminalId, writeModifiedInput],
   );
 
   const handleDismissKeyboard = useCallback(() => {
-    setIsAccessoryDismissed(true);
     void KeyboardController.dismiss();
   }, []);
 
@@ -1275,91 +1261,67 @@ export function ThreadTerminalRouteScreen(props: ThreadTerminalRouteScreenProps)
               />
             </View>
 
-            {isAccessoryVisible ? (
-              <KeyboardStickyView
-                style={{ position: "absolute", bottom: 0, left: 0, right: 0 }}
-                offset={{ closed: 0, opened: 0 }}
+            <KeyboardStickyView
+              style={{ position: "absolute", bottom: 0, left: 0, right: 0 }}
+              offset={{ closed: 0, opened: 0 }}
+            >
+              <View
+                className="border-t"
+                style={{
+                  backgroundColor: terminalTheme.background,
+                  borderTopColor: terminalTheme.border,
+                  minHeight: TERMINAL_ACCESSORY_HEIGHT,
+                  paddingBottom: accessoryBottomInset,
+                }}
               >
-                <View
-                  className="border-t"
-                  style={{
-                    backgroundColor: terminalTheme.background,
-                    borderTopColor: terminalTheme.border,
-                    minHeight: TERMINAL_ACCESSORY_HEIGHT,
-                  }}
-                >
-                  <ComposerToolbarRow paddingBottom={4} paddingHorizontal={8} paddingTop={4}>
-                    <ComposerToolbarScroller
-                      contentPaddingRight={2}
-                      fadeOpaque={terminalTheme.background}
-                      fadeTransparent={`${terminalTheme.background}00`}
-                    >
-                      {terminalToolbarActions.map((action) => {
-                        const active =
-                          action.kind === "modifier" && pendingModifier === action.modifier;
+                <ComposerToolbarRow paddingBottom={4} paddingHorizontal={8} paddingTop={4}>
+                  <ComposerToolbarScroller
+                    contentPaddingRight={2}
+                    fadeOpaque={terminalTheme.background}
+                    fadeTransparent={`${terminalTheme.background}00`}
+                  >
+                    {terminalToolbarActions.map((action) => {
+                      const active =
+                        action.kind === "modifier" && pendingModifier === action.modifier;
 
-                        return (
-                          <ComposerToolbarButton
-                            key={action.key}
-                            active={active}
-                            label={action.label}
-                            maxWidth={120}
-                            minWidth={action.label.length > 1 ? 56 : 44}
-                            onPress={() => handleToolbarActionPress(action)}
-                            showChevron={false}
-                            textTransform={
-                              action.kind === "modifier" || action.kind === "clear"
-                                ? "uppercase"
-                                : "none"
-                            }
-                          />
-                        );
-                      })}
-                    </ComposerToolbarScroller>
-                    <ComposerToolbarButton
-                      accessibilityLabel="Dismiss keyboard"
-                      icon={{ ios: "keyboard.chevron.compact.down", android: "keyboard_hide" }}
-                      onPress={handleDismissKeyboard}
-                      showChevron={false}
-                    />
-                  </ComposerToolbarRow>
-                </View>
-              </KeyboardStickyView>
-            ) : !keyboardState.isVisible ? (
-              <Pressable
-                accessibilityLabel="Show keyboard"
-                accessibilityRole="button"
-                onPress={handleShowKeyboard}
-                style={({ pressed }) => ({
-                  bottom: 16,
-                  borderRadius: 28,
-                  opacity: pressed ? 0.72 : 1,
-                  position: "absolute",
-                  right: 16,
-                })}
-              >
-                <GlassSurface
-                  chrome="none"
-                  glassEffectStyle="regular"
-                  tintColor="transparent"
-                  style={{
-                    alignItems: "center",
-                    borderRadius: 24,
-                    height: 48,
-                    justifyContent: "center",
-                    width: 48,
-                  }}
-                  pointerEvents="none"
-                >
-                  <SymbolView
-                    name={{ ios: "keyboard", android: "keyboard" }}
-                    size={20}
-                    tintColor={terminalTheme.foreground}
-                    type="monochrome"
+                      return (
+                        <ComposerToolbarButton
+                          key={action.key}
+                          active={active}
+                          label={action.label}
+                          maxWidth={120}
+                          minWidth={action.label.length > 1 ? 56 : 44}
+                          onPress={() => handleToolbarActionPress(action)}
+                          showChevron={false}
+                          textTransform={
+                            action.kind === "modifier" || action.kind === "clear"
+                              ? "uppercase"
+                              : "none"
+                          }
+                        />
+                      );
+                    })}
+                  </ComposerToolbarScroller>
+                  <TerminalArrowControls
+                    key={`${terminalKey}:${terminal.lifecycleVersion}`}
+                    disabled={!isRunning || !isFocused}
+                    onInput={writeModifiedInput}
                   />
-                </GlassSurface>
-              </Pressable>
-            ) : null}
+                  <ComposerToolbarButton
+                    accessibilityLabel={
+                      keyboardState.isVisible ? "Dismiss keyboard" : "Show keyboard"
+                    }
+                    icon={
+                      keyboardState.isVisible
+                        ? { ios: "keyboard.chevron.compact.down", android: "keyboard_hide" }
+                        : { ios: "keyboard", android: "keyboard" }
+                    }
+                    onPress={keyboardState.isVisible ? handleDismissKeyboard : handleShowKeyboard}
+                    showChevron={false}
+                  />
+                </ComposerToolbarRow>
+              </View>
+            </KeyboardStickyView>
           </>
         )}
       </View>
