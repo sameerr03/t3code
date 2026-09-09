@@ -378,7 +378,7 @@ private class ComposerChipSpan(
 ) : ReplacementSpan() {
   private val horizontalPadding = 7f * density
   private val verticalPadding = 2f * density
-  private val cornerRadius = 6f * density
+  private val cornerRadius = 8f * density
   private val borderWidth = density
   private val iconPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
     style = Paint.Style.STROKE
